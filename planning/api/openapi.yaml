@@ -1,0 +1,2944 @@
+openapi: 3.1.0
+info:
+  title: Personal Assistant Mobile API
+  version: 0.2.0
+  summary: Backend contract for the React Native (Expo) personal assistant app.
+  description: |
+    REST API used by the mobile app for every screen (S1–S10 in the UI brief, plus S11 Chat history), plus the
+    streaming chat endpoint and the iOS Shortcut endpoint.
+
+    Conventions (see planning/api/README.md for detail):
+    - Datetimes are ISO 8601 with an explicit offset in the user's timezone (INV-5). Local
+      calendar dates are `YYYY-MM-DD` in the user's timezone.
+    - Every non-idempotent write accepts `Idempotency-Key` (UUID), stored as the write's
+      `request_id` (INV-4). Replays return the original response.
+    - `user_id` is never accepted in any request; it comes from the token (INV-7).
+    - Errors use `{ "error": { "code", "message", "retryable" } }` (ARCH §5).
+    - Lists use cursor pagination: `?cursor=&limit=` → `{ items, next_cursor }`.
+    - Calendar writes are never exposed as REST writes; they go through chat and the
+      action-card confirm flow (INV-3, D-13).
+
+    Decision IDs (D-n) and question IDs (Q-n) refer to planning/gap-analysis.md and
+    planning/open-questions.md.
+servers:
+  - url: https://api.{env}.{domain}/v1
+    description: REST API (API Gateway HTTP API, Cognito JWT authorizer)
+    variables:
+      env:
+        default: dev
+        enum: [dev, prod]
+      domain:
+        default: example.com
+  - url: https://{url_id}.lambda-url.us-west-2.on.aws/v1
+    description: |
+      Chat Lambda Function URL (AuthType NONE, InvokeMode RESPONSE_STREAM); JWTs are
+      verified in the function (D-38, planning/chat-service.md). Hosts only
+      POST /conversations/{conversation_id}/messages, POST /shortcut/message, and GET /warm.
+      Clients read the base URL from GET /me → endpoints.chat_base_url.
+    variables:
+      url_id:
+        default: abc123exampleurlid
+        description: Function URL id, from the stack output.
+security:
+  - cognitoJwt: []
+tags:
+  - name: Account
+    description: Profile, settings, devices, vocabulary (S1, S9)
+  - name: Integrations
+    description: Google Calendar connection and Siri Shortcut tokens (S1, S9)
+  - name: Today
+    description: Aggregate Today screen and calendar reads (S2)
+  - name: Chat
+    description: Conversations, history and search, streaming turns, action cards (S3, S10, S11)
+  - name: Check-ins
+    description: Morning check-in (R9, S2, S10)
+  - name: Logging
+    description: Activities, habits, log entries (S4)
+  - name: Insights
+    description: Analytics (S5)
+  - name: Lists
+    description: Shopping and other lists (S6)
+  - name: Chores
+    description: Recurring chores (S6)
+  - name: Reminders
+    description: Reminders and notification history (S8)
+  - name: Notes
+    description: Notes and search (S7)
+  - name: Shortcut
+    description: iOS Shortcut endpoint (R10)
+
+paths:
+  # ───────────────────────────── Account ─────────────────────────────
+  /me:
+    get:
+      tags: [Account]
+      operationId: getMe
+      summary: Current user profile and all settings
+      description: Used by S9 and at app launch. Creates the users row on first call (D-31).
+      parameters:
+        - $ref: '#/components/parameters/DeviceTimezone'
+      responses:
+        '200':
+          description: OK
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Me' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /me/settings:
+    patch:
+      tags: [Account]
+      operationId: updateSettings
+      summary: Update settings (partial)
+      description: |
+        Merge-patch of settings. Changing `checkin.time` or `timezone` updates the
+        per-user check-in schedule (D-19). Enabling `channels_enabled.sms` requires a verified
+        phone number (`409 phone_not_verified`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SettingsPatch' }
+      responses:
+        '200':
+          description: Updated user
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Me' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /me/phone:
+    post:
+      tags: [Account]
+      operationId: startPhoneVerification
+      summary: Set phone number and send a verification code (Q-8)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone_e164]
+              properties:
+                phone_e164: { type: string, pattern: '^\+[1-9]\d{6,14}$', examples: ['+15035550142'] }
+      responses:
+        '202': { description: 'Code sent' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+    delete:
+      tags: [Account]
+      operationId: removePhone
+      summary: Remove phone number (disables SMS)
+      responses:
+        '204': { description: 'Removed' }
+
+  /me/phone/verify:
+    post:
+      tags: [Account]
+      operationId: verifyPhone
+      summary: Confirm the verification code
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string, pattern: '^\d{6}$' }
+      responses:
+        '200':
+          description: Verified
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Me' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /devices/{expo_token}:
+    parameters:
+      - name: expo_token
+        in: path
+        required: true
+        description: URL-encoded `ExponentPushToken[...]`
+        schema: { type: string }
+    put:
+      tags: [Account]
+      operationId: registerDevice
+      summary: Register or refresh a push token (D-30)
+      description: Call on every launch after notification permission is granted. Idempotent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [platform]
+              properties:
+                platform: { type: string, enum: [ios, android] }
+                app_version: { type: string, examples: ['1.0.0 (42)'] }
+      responses:
+        '200':
+          description: Registered
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Device' }
+    delete:
+      tags: [Account]
+      operationId: revokeDevice
+      summary: Revoke a push token (sign-out)
+      responses:
+        '204': { description: 'Revoked' }
+
+  /vocabulary:
+    get:
+      tags: [Account]
+      operationId: getVocabulary
+      summary: Speech recognition hints (R10, D-29)
+      description: Custom terms first, then activity, list, and chore names ranked by use. Capped at 100.
+      responses:
+        '200':
+          description: OK
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Vocabulary' }
+    put:
+      tags: [Account]
+      operationId: setCustomVocabulary
+      summary: Replace the user-managed hint list (S9 "Vocabulary hints")
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [custom]
+              properties:
+                custom:
+                  type: array
+                  maxItems: 50
+                  items: { type: string, maxLength: 40 }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Vocabulary' }
+
+  /notifications/test:
+    post:
+      tags: [Account]
+      operationId: sendTestNotification
+      summary: Send a test notification (S9, D-25)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                channels:
+                  type: array
+                  description: Defaults to all enabled channels.
+                  items: { $ref: '#/components/schemas/Channel' }
+      responses:
+        '200':
+          description: Per-channel results
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deliveries]
+                properties:
+                  deliveries:
+                    type: array
+                    items: { $ref: '#/components/schemas/Delivery' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  # ─────────────────────────── Integrations ───────────────────────────
+  /integrations:
+    get:
+      tags: [Integrations]
+      operationId: listIntegrations
+      summary: Integration status (S9 Integrations group, D-27)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Integration' }
+
+  /integrations/google/connect:
+    post:
+      tags: [Integrations]
+      operationId: startGoogleConnect
+      summary: Begin Google OAuth (S1 step 3, S9 Reconnect; D-26)
+      description: |
+        Returns a Google authorization URL with a signed `state`. Open it with
+        `WebBrowser.openAuthSessionAsync(url, return_url)`. Google redirects to the backend
+        callback, which exchanges the code, stores the refresh token in Secrets Manager, and
+        redirects to `return_url` with `?provider=google&result=connected|error&code=...`.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                return_url:
+                  type: string
+                  default: assistant://settings/integrations
+      responses:
+        '200':
+          description: Authorization URL
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [authorization_url, expires_at]
+                properties:
+                  authorization_url: { type: string, format: uri }
+                  expires_at: { type: string, format: date-time }
+
+  /integrations/google/callback:
+    get:
+      tags: [Integrations]
+      operationId: googleOAuthCallback
+      summary: OAuth redirect target (browser only, not called by the app)
+      security: []
+      parameters:
+        - { name: code, in: query, schema: { type: string } }
+        - { name: state, in: query, required: true, schema: { type: string } }
+        - { name: error, in: query, schema: { type: string } }
+      responses:
+        '302': { description: 'Redirect to the app''s return_url' }
+
+  /integrations/google:
+    patch:
+      tags: [Integrations]
+      operationId: updateGoogleIntegration
+      summary: Choose which calendars to read (Q-10)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                calendar_ids:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Integration' }
+    delete:
+      tags: [Integrations]
+      operationId: disconnectGoogle
+      summary: Disconnect Google Calendar and delete the stored token
+      responses:
+        '204': { description: 'Disconnected' }
+
+  /integrations/google/calendars:
+    get:
+      tags: [Integrations]
+      operationId: listGoogleCalendars
+      summary: Calendars available on the connected account (Q-10)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, name, selected]
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        primary: { type: boolean }
+                        selected: { type: boolean }
+        '409': { $ref: '#/components/responses/IntegrationBroken' }
+
+  /shortcut-tokens:
+    get:
+      tags: [Integrations]
+      operationId: listShortcutTokens
+      summary: Active Siri Shortcut tokens (S9)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/ShortcutToken' }
+    post:
+      tags: [Integrations]
+      operationId: createShortcutToken
+      summary: Create a token; the plaintext is returned only in this response (D-28)
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                label: { type: string, maxLength: 60, examples: ["Gabe's iPhone"] }
+                revoke_existing:
+                  type: boolean
+                  default: true
+                  description: '"Create new" in S9 rotates the token.'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ShortcutTokenCreated' }
+
+  /shortcut-tokens/{token_id}:
+    parameters:
+      - $ref: '#/components/parameters/TokenId'
+    delete:
+      tags: [Integrations]
+      operationId: revokeShortcutToken
+      summary: Revoke a token
+      responses:
+        '204': { description: 'Revoked' }
+
+  # ─────────────────────────────── Today ───────────────────────────────
+  /today:
+    get:
+      tags: [Today]
+      operationId: getToday
+      summary: Everything the Today screen shows, in one payload (S2, D-8)
+      parameters:
+        - name: date
+          in: query
+          description: Local date; defaults to today in the user's timezone.
+          schema: { type: string, format: date }
+        - $ref: '#/components/parameters/IfNoneMatch'
+      responses:
+        '200':
+          description: OK
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Today' }
+        '304': { description: 'Not modified' }
+
+  /calendar/events:
+    get:
+      tags: [Today]
+      operationId: listCalendarEvents
+      summary: Calendar events in a range (read-only)
+      parameters:
+        - { name: start, in: query, required: true, schema: { type: string, format: date-time } }
+        - { name: end, in: query, required: true, schema: { type: string, format: date-time } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/CalendarEvent' }
+        '409': { $ref: '#/components/responses/IntegrationBroken' }
+
+  /calendar/events/{event_id}:
+    get:
+      tags: [Today]
+      operationId: getCalendarEvent
+      summary: One event, for the event details sheet (S2)
+      parameters:
+        - { name: event_id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CalendarEvent' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/IntegrationBroken' }
+
+  # ─────────────────────────────── Chat ───────────────────────────────
+  /chat/home:
+    get:
+      tags: [Chat]
+      operationId: getChatHome
+      summary: What the Chat tab shows on open (D-40)
+      description: |
+        If `resume_conversation` is non-null, open it directly (p.2). Otherwise show the New
+        chat screen (p.15) with `recent` ("Continue a recent chat") and `suggestions`.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChatHome' }
+
+  /chat/search:
+    get:
+      tags: [Chat]
+      operationId: searchHistory
+      summary: Search chat history and notes by meaning and keyword (S11, D-43)
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 200 }
+        - name: limit
+          in: query
+          description: Max results per section.
+          schema: { type: integer, default: 10, minimum: 1, maximum: 50 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HistorySearchResult' }
+
+  /conversations:
+    get:
+      tags: [Chat]
+      operationId: listConversations
+      summary: History list, most recently active first (S11, D-41)
+      description: Excludes deleted conversations and conversations with no messages.
+      parameters:
+        - name: kind
+          in: query
+          description: '"Check-ins" filter = `kind=checkin`.'
+          schema: { $ref: '#/components/schemas/ConversationKind' }
+        - name: has_changes
+          in: query
+          description: '"With changes" filter: at least one saved, confirmed, or pending card.'
+          schema: { type: boolean }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Conversation' }
+                  next_cursor: { $ref: '#/components/schemas/NextCursor' }
+    post:
+      tags: [Chat]
+      operationId: createConversation
+      summary: Create a chat conversation (called on the first send from New chat)
+      description: |
+        Created lazily: the app calls this just before the first
+        POST /conversations/{id}/messages. Send an Idempotency-Key so an offline replay
+        does not create duplicates.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Conversation' }
+
+  /conversations/{conversation_id}:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+    get:
+      tags: [Chat]
+      operationId: getConversation
+      summary: Conversation metadata (header title and date)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Conversation' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Chat]
+      operationId: renameConversation
+      summary: Rename (header "…" menu, D-42)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: { type: string, minLength: 1, maxLength: 80 }
+      responses:
+        '200':
+          description: Renamed; title_source becomes `user`
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Conversation' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Chat]
+      operationId: deleteConversation
+      summary: Delete from history (soft delete; created entities are untouched)
+      responses:
+        '204': { description: Deleted }
+        '409':
+          description: '`turn_in_progress`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /conversations/{conversation_id}/messages:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+    get:
+      tags: [Chat]
+      operationId: listMessages
+      summary: Messages, newest first (scroll back with `cursor`)
+      description: Returns the client projection only; tool_use and tool_result blocks are never exposed.
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/ChatMessage' }
+                  next_cursor: { $ref: '#/components/schemas/NextCursor' }
+    post:
+      tags: [Chat]
+      operationId: sendMessage
+      summary: Send a user message and run one assistant turn (R1, R10)
+      description: |
+        Served from the chat Lambda Function URL (D-38), not API Gateway. Call GET /warm
+        first when the user starts composing (planning/api/README.md).
+
+        - `Accept: text/event-stream` (app default) streams `ChatStreamEvent`s; see
+          planning/api/README.md for the event sequence.
+        - `Accept: application/json` waits and returns a `TurnResult`.
+
+        Idempotent on `client_message_id` (D-16): a replay returns the stored turn (as JSON,
+        or as a single `turn.completed` event) without calling the model again. A replay
+        while the original turn is still running returns `409 turn_in_progress`.
+
+        Any conversation that is not deleted accepts messages; sending to an older one makes
+        it current (D-44). The model context is that conversation's last 20 messages plus
+        its rolling summary.
+      servers:
+        - url: https://{url_id}.lambda-url.us-west-2.on.aws/v1
+          variables:
+            url_id: { default: abc123exampleurlid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SendMessageRequest' }
+      responses:
+        '200':
+          description: Turn stream or completed turn
+          content:
+            text/event-stream:
+              schema:
+                description: A stream of server-sent events; each `data:` line is one ChatStreamEvent.
+                type: string
+              x-event-schema: { $ref: '#/components/schemas/ChatStreamEvent' }
+            application/json:
+              schema: { $ref: '#/components/schemas/TurnResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /action-cards/{card_id}:
+    parameters:
+      - $ref: '#/components/parameters/CardId'
+    get:
+      tags: [Chat]
+      operationId: getActionCard
+      summary: Current state of one card
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ActionCard' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /action-cards/{card_id}/confirm:
+    parameters:
+      - $ref: '#/components/parameters/CardId'
+    post:
+      tags: [Chat]
+      operationId: confirmActionCard
+      summary: Confirm a pending calendar change (INV-3, D-13)
+      description: |
+        Runs the stored confirm-first tool call with `confirm: true` and the stored
+        confirmation token, without an LLM round trip. Appends a short assistant message
+        to the conversation. Not allowed with a Shortcut token.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Executed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CardActionResult' }
+        '409':
+          description: |
+            `card_not_pending` (already confirmed or cancelled), `confirmation_expired` (Q-13),
+            or `stale_preview` (the event changed since the preview).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '424': { $ref: '#/components/responses/IntegrationBroken' }
+
+  /action-cards/{card_id}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/CardId'
+    post:
+      tags: [Chat]
+      operationId: cancelActionCard
+      summary: Cancel a pending calendar change
+      responses:
+        '200':
+          description: Cancelled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CardActionResult' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /action-cards/{card_id}/undo:
+    parameters:
+      - $ref: '#/components/parameters/CardId'
+    post:
+      tags: [Chat]
+      operationId: undoActionCard
+      summary: Undo a saved low-risk write (log, note, list change, chore, reminder)
+      description: Wraps `undo_entry`. Allowed until `undo_expires_at` (10 minutes server-side).
+      responses:
+        '200':
+          description: Undone
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CardActionResult' }
+        '409':
+          description: '`undo_expired` or `card_not_undoable`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /action-cards/{card_id}/renew:
+    parameters:
+      - $ref: '#/components/parameters/CardId'
+    post:
+      tags: [Chat]
+      operationId: renewActionCard
+      summary: Refresh an expired calendar preview ("Add now", D-46)
+      description: |
+        Re-runs the stored confirm-first tool call with `confirm: false` against the current
+        calendar and issues a new confirmation token. Returns the card back in
+        `pending_confirmation`, with `data` updated if anything changed. The user still
+        taps Confirm (Q-19).
+      responses:
+        '200':
+          description: Renewed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CardActionResult' }
+        '409':
+          description: '`card_not_expired` (only `expired` cards can be renewed)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '424': { $ref: '#/components/responses/IntegrationBroken' }
+
+  # ───────────────────────────── Check-ins ─────────────────────────────
+  /checkins/{date}:
+    parameters:
+      - $ref: '#/components/parameters/DatePath'
+    get:
+      tags: [Check-ins]
+      operationId: getCheckin
+      summary: The check-in for a local date
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Checkin' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /checkins/{date}/conversation:
+    parameters:
+      - $ref: '#/components/parameters/DatePath'
+    post:
+      tags: [Check-ins]
+      operationId: openCheckinConversation
+      summary: Open (or create) the conversation for a check-in (S10, D-11)
+      description: |
+        Target of the app link `assistant://checkin/{date}`. Idempotent: returns the
+        existing conversation if one is linked. If no check-in exists for the date and the
+        date is today, generates it on demand without sending notifications.
+      responses:
+        '200':
+          description: Conversation, seeded with the check-in message
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [conversation, checkin]
+                properties:
+                  conversation: { $ref: '#/components/schemas/Conversation' }
+                  checkin: { $ref: '#/components/schemas/Checkin' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ───────────────────────────── Logging ─────────────────────────────
+  /activities:
+    get:
+      tags: [Logging]
+      operationId: listActivities
+      summary: Activity catalog with last-logged info and habit streaks (S2 habits, S4 tiles; D-4)
+      parameters:
+        - name: category
+          in: query
+          schema: { $ref: '#/components/schemas/Category' }
+        - name: favorites_only
+          in: query
+          schema: { type: boolean, default: false }
+        - name: include_archived
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: OK, ordered by sort_order then name
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Activity' }
+    post:
+      tags: [Logging]
+      operationId: createActivity
+      summary: Add an activity or habit (S4 "+")
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ActivityCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Activity' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /activities/order:
+    put:
+      tags: [Logging]
+      operationId: reorderActivities
+      summary: Set favorite tile order
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [activity_ids]
+              properties:
+                activity_ids:
+                  type: array
+                  items: { type: string, format: uuid }
+      responses:
+        '204': { description: 'Reordered' }
+
+  /activities/{activity_id}:
+    parameters:
+      - $ref: '#/components/parameters/ActivityId'
+    patch:
+      tags: [Logging]
+      operationId: updateActivity
+      summary: Edit an activity, toggle favorite (C7 long-press)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ActivityPatch' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Activity' }
+    delete:
+      tags: [Logging]
+      operationId: archiveActivity
+      summary: Archive an activity (history is kept)
+      responses:
+        '204': { description: 'Archived' }
+
+  /log-entries:
+    get:
+      tags: [Logging]
+      operationId: listLogEntries
+      summary: Log entries, newest first (S4 Recent and See all)
+      parameters:
+        - name: category
+          in: query
+          schema: { $ref: '#/components/schemas/Category' }
+        - name: activity_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: since
+          in: query
+          schema: { type: string, format: date-time }
+        - name: until
+          in: query
+          schema: { type: string, format: date-time }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/LogEntry' }
+                  next_cursor: { $ref: '#/components/schemas/NextCursor' }
+    post:
+      tags: [Logging]
+      operationId: createLogEntry
+      summary: Log an entry directly (S4 log sheet, S2 habit chip; R5)
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LogEntryCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LogEntry' }
+        '200':
+          description: Idempotent replay of an earlier create
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LogEntry' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /log-entries/{entry_id}:
+    parameters:
+      - $ref: '#/components/parameters/EntryId'
+    get:
+      tags: [Logging]
+      operationId: getLogEntry
+      summary: One log entry
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LogEntry' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Logging]
+      operationId: updateLogEntry
+      summary: Edit a log entry
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LogEntryPatch' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LogEntry' }
+    delete:
+      tags: [Logging]
+      operationId: deleteLogEntry
+      summary: Soft-delete (swipe-to-delete; Undo toast after quick log)
+      responses:
+        '204': { description: 'Deleted' }
+
+  /log-entries/{entry_id}/restore:
+    parameters:
+      - $ref: '#/components/parameters/EntryId'
+    post:
+      tags: [Logging]
+      operationId: restoreLogEntry
+      summary: Undo a delete (toast Undo after swipe-to-delete)
+      responses:
+        '200':
+          description: Restored
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LogEntry' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  # ───────────────────────────── Insights ─────────────────────────────
+  /insights:
+    get:
+      tags: [Insights]
+      operationId: getInsights
+      summary: Analytics for a period (S5, R6, D-35)
+      description: |
+        All aggregates are computed in SQL (INV-2). Weeks run Monday–Sunday. Every period
+        is compared with the full previous period of the same kind (D-39).
+      parameters:
+        - name: period
+          in: query
+          required: true
+          schema: { type: string, enum: [week, month, custom] }
+        - name: start
+          in: query
+          description: Required when period=custom (local date, inclusive).
+          schema: { type: string, format: date }
+        - name: end
+          in: query
+          description: Required when period=custom (local date, inclusive). Max 366 days.
+          schema: { type: string, format: date }
+        - name: anchor
+          in: query
+          description: A local date inside the week or month to show; defaults to today.
+          schema: { type: string, format: date }
+        - name: breakdown_category
+          in: query
+          description: Category for the "Time per activity" list (Q-5c).
+          schema:
+            $ref: '#/components/schemas/Category'
+            default: training
+      responses:
+        '200':
+          description: OK
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Insights' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  # ─────────────────────────────── Lists ───────────────────────────────
+  /lists:
+    get:
+      tags: [Lists]
+      operationId: listLists
+      summary: All lists with counts (S6 list chips)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/List' }
+    post:
+      tags: [Lists]
+      operationId: createList
+      summary: Create a list ("+ New")
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 60 }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/List' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /lists/{list_id}:
+    parameters:
+      - $ref: '#/components/parameters/ListId'
+    get:
+      tags: [Lists]
+      operationId: getList
+      summary: A list with its items
+      parameters:
+        - name: include_checked
+          in: query
+          schema: { type: boolean, default: true }
+      responses:
+        '200':
+          description: OK
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ListWithItems' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Lists]
+      operationId: updateList
+      summary: Rename or reorder a list
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, minLength: 1, maxLength: 60 }
+                sort_order: { type: integer }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/List' }
+    delete:
+      tags: [Lists]
+      operationId: deleteList
+      summary: Delete a list
+      responses:
+        '204': { description: 'Deleted' }
+
+  /lists/{list_id}/items:
+    parameters:
+      - $ref: '#/components/parameters/ListId'
+    post:
+      tags: [Lists]
+      operationId: addListItems
+      summary: Add one or more items (add-item field)
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  minItems: 1
+                  maxItems: 50
+                  items:
+                    type: object
+                    required: [text]
+                    properties:
+                      text: { type: string, minLength: 1, maxLength: 120 }
+                      quantity: { type: [string, 'null'], maxLength: 20, examples: ['12'] }
+      responses:
+        '201':
+          description: Created items
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/ListItem' }
+
+  /lists/{list_id}/items/{item_id}:
+    parameters:
+      - $ref: '#/components/parameters/ListId'
+      - $ref: '#/components/parameters/ItemId'
+    patch:
+      tags: [Lists]
+      operationId: updateListItem
+      summary: Check, uncheck, or edit an item
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                checked: { type: boolean }
+                text: { type: string, minLength: 1, maxLength: 120 }
+                quantity: { type: [string, 'null'], maxLength: 20 }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ListItem' }
+    delete:
+      tags: [Lists]
+      operationId: deleteListItem
+      summary: Remove an item
+      responses:
+        '204': { description: 'Deleted' }
+
+  /lists/{list_id}/clear-checked:
+    parameters:
+      - $ref: '#/components/parameters/ListId'
+    post:
+      tags: [Lists]
+      operationId: clearCheckedItems
+      summary: Soft-delete all checked items ("Clear")
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Cleared
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [cleared_count, list]
+                properties:
+                  cleared_count: { type: integer }
+                  list: { $ref: '#/components/schemas/List' }
+
+  # ─────────────────────────────── Chores ───────────────────────────────
+  /chores:
+    get:
+      tags: [Chores]
+      operationId: listChores
+      summary: Chores with due grouping (S6 Chores)
+      responses:
+        '200':
+          description: OK, ordered by next_due_at
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Chore' }
+    post:
+      tags: [Chores]
+      operationId: createChore
+      summary: Add a chore ("Add a chore")
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChoreCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Chore' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+
+  /chores/{chore_id}:
+    parameters:
+      - $ref: '#/components/parameters/ChoreId'
+    patch:
+      tags: [Chores]
+      operationId: updateChore
+      summary: Edit a chore
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChorePatch' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Chore' }
+    delete:
+      tags: [Chores]
+      operationId: deleteChore
+      summary: Delete a chore and its pending reminders
+      responses:
+        '204': { description: 'Deleted' }
+
+  /chores/{chore_id}/complete:
+    parameters:
+      - $ref: '#/components/parameters/ChoreId'
+    post:
+      tags: [Chores]
+      operationId: completeChore
+      summary: Mark done (swipe right, Today checkbox)
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                completed_at: { type: string, format: date-time, description: 'Defaults to now.' }
+      responses:
+        '200':
+          description: Done; next_due_at advanced from rrule
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChoreEventResult' }
+
+  /chores/{chore_id}/skip:
+    parameters:
+      - $ref: '#/components/parameters/ChoreId'
+    post:
+      tags: [Chores]
+      operationId: skipChore
+      summary: Skip once (swipe left)
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Skipped; next_due_at advanced, last_done_at unchanged
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChoreEventResult' }
+
+  /chores/{chore_id}/events/{event_id}:
+    parameters:
+      - $ref: '#/components/parameters/ChoreId'
+      - { name: event_id, in: path, required: true, schema: { type: string, format: uuid } }
+    delete:
+      tags: [Chores]
+      operationId: undoChoreEvent
+      summary: Undo a done or skip (toast Undo; D-33)
+      description: Only the most recent event can be undone, within 10 minutes.
+      responses:
+        '200':
+          description: Undone; chore restored
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Chore' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  # ───────────────────────────── Reminders ─────────────────────────────
+  /reminders:
+    get:
+      tags: [Reminders]
+      operationId: listReminders
+      summary: Upcoming reminders, or notification history (S8)
+      description: |
+        `scope=upcoming`: scheduled reminders, by fire_at ascending.
+        `scope=past`: sent, failed, and cancelled reminders plus check-in deliveries from the
+        last `days` days, by fire_at descending (D-21).
+      parameters:
+        - name: scope
+          in: query
+          required: true
+          schema: { type: string, enum: [upcoming, past] }
+        - name: days
+          in: query
+          description: Lookback for scope=past.
+          schema: { type: integer, default: 7, minimum: 1, maximum: 90 }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/NotificationItem' }
+                  next_cursor: { $ref: '#/components/schemas/NextCursor' }
+    post:
+      tags: [Reminders]
+      operationId: createReminder
+      summary: Create a reminder directly (S8 "+")
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReminderCreate' }
+      responses:
+        '201':
+          description: Created and scheduled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Reminder' }
+        '422':
+          description: '`fire_at_in_past` or `channel_unavailable` (e.g. SMS without a verified phone)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /reminders/{reminder_id}:
+    parameters:
+      - $ref: '#/components/parameters/ReminderId'
+    get:
+      tags: [Reminders]
+      operationId: getReminder
+      summary: One reminder with delivery results (push "Reminder" deep link)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Reminder' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Reminders]
+      operationId: updateReminder
+      summary: Edit message, time, channels, priority, or completion (D-10, D-23)
+      description: |
+        Changing `fire_at` reschedules (only while `status = scheduled`). Setting
+        `completed: true` marks it done (Today checkbox, push "Done" action);
+        `completed: false` undoes that.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReminderPatch' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Reminder' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+    delete:
+      tags: [Reminders]
+      operationId: cancelReminder
+      summary: Cancel (swipe to cancel); deletes the schedule
+      responses:
+        '204': { description: 'Cancelled' }
+
+  /reminders/{reminder_id}/snooze:
+    parameters:
+      - $ref: '#/components/parameters/ReminderId'
+    post:
+      tags: [Reminders]
+      operationId: snoozeReminder
+      summary: Snooze (push action "Snooze 10 min", S8 sheet)
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                minutes: { type: integer, default: 10, minimum: 1, maximum: 1440 }
+      responses:
+        '200':
+          description: Rescheduled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Reminder' }
+
+  /reminders/{reminder_id}/retry:
+    parameters:
+      - $ref: '#/components/parameters/ReminderId'
+    post:
+      tags: [Reminders]
+      operationId: retryReminder
+      summary: Re-send failed channels only (S8 "Retry", D-22)
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Retried; includes the new delivery rows
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Reminder' }
+        '409':
+          description: '`nothing_to_retry`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  # ─────────────────────────────── Notes ───────────────────────────────
+  /notes:
+    get:
+      tags: [Notes]
+      operationId: listNotes
+      summary: Notes, newest first, or search results (S7)
+      description: |
+        With `q`, runs hybrid semantic + keyword search and orders by relevance
+        (`score` populated); otherwise orders by updated_at descending.
+      parameters:
+        - name: q
+          in: query
+          schema: { type: string, maxLength: 200 }
+        - name: tag
+          in: query
+          schema: { type: string }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/NoteSummary' }
+                  next_cursor: { $ref: '#/components/schemas/NextCursor' }
+    post:
+      tags: [Notes]
+      operationId: createNote
+      summary: Create a note (S7 "+")
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NoteCreate' }
+      responses:
+        '201':
+          description: Created (embedding computed asynchronously)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Note' }
+
+  /notes/{note_id}:
+    parameters:
+      - $ref: '#/components/parameters/NoteId'
+    get:
+      tags: [Notes]
+      operationId: getNote
+      summary: Note detail with attached reminders
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Note' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Notes]
+      operationId: updateNote
+      summary: Edit title, body, or tags (plain text)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NotePatch' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Note' }
+    delete:
+      tags: [Notes]
+      operationId: deleteNote
+      summary: Soft-delete a note and cancel its reminders
+      responses:
+        '204': { description: 'Deleted' }
+
+  /warm:
+    get:
+      tags: [Chat]
+      operationId: warmChat
+      summary: Warm the chat Lambda (no-op)
+      description: |
+        Fire-and-forget request the app sends when the Chat tab gains focus, the mic is
+        pressed, or the composer is focused, at most once per 2 minutes. Initializes
+        the runtime (secrets, DB connection, JWKS) so the next turn starts warm. Does no
+        work and touches no data (D-38, Q-20).
+      security: []
+      servers:
+        - url: https://{url_id}.lambda-url.us-west-2.on.aws/v1
+          variables:
+            url_id: { default: abc123exampleurlid }
+      responses:
+        '204': { description: Warm }
+
+  # ───────────────────────────── Shortcut ─────────────────────────────
+  /shortcut/message:
+    post:
+      tags: [Shortcut]
+      operationId: shortcutMessage
+      summary: iOS Shortcut voice entry point (ARCH §4.1)
+      description: |
+        Authenticated with a Shortcut token, not a Cognito JWT. Rate-limited. Appends to the
+        current conversation if it is inside the resume window, otherwise starts a new
+        `shortcut` conversation (D-47), with `input_mode = voice`. Confirm-first tools can
+        only produce a pending card; the response says to open the app, and a push deep
+        links to the card.
+      security:
+        - shortcutToken: []
+      servers:
+        - url: https://{url_id}.lambda-url.us-west-2.on.aws/v1
+          variables:
+            url_id: { default: abc123exampleurlid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text: { type: string, minLength: 1, maxLength: 2000 }
+                input_mode: { type: string, enum: [voice, text], default: voice }
+      responses:
+        '200':
+          description: Completed turn, flattened for the Shortcut's Speak Text action
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [display_text, spoken_text]
+                properties:
+                  display_text: { type: string }
+                  spoken_text: { type: string, description: '≤ 20 words (ARCH §4.1)' }
+                  needs_app_confirmation: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+components:
+  securitySchemes:
+    cognitoJwt:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Cognito access token from the hosted UI (PKCE via expo-auth-session).
+    shortcutToken:
+      type: http
+      scheme: bearer
+      description: Per-device Shortcut token (`pa_...`). Only valid for POST /shortcut/message.
+
+  headers:
+    ETag:
+      description: Opaque version tag; send as If-None-Match to revalidate.
+      schema: { type: string }
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      description: Client-generated UUID, stored as `request_id` (INV-4). Strongly recommended on all queued offline writes.
+      schema: { type: string, format: uuid }
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      schema: { type: string }
+    DeviceTimezone:
+      name: X-Device-Timezone
+      in: header
+      description: IANA timezone of the device (D-37). Sent on every request.
+      schema: { type: string, examples: [America/Los_Angeles] }
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, default: 25, minimum: 1, maximum: 100 }
+    DatePath:
+      name: date
+      in: path
+      required: true
+      schema: { type: string, format: date }
+    ConversationId:
+      name: conversation_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    CardId:
+      name: card_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ActivityId:
+      name: activity_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    EntryId:
+      name: entry_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ListId:
+      name: list_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ItemId:
+      name: item_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ChoreId:
+      name: chore_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ReminderId:
+      name: reminder_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    NoteId:
+      name: note_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    TokenId:
+      name: token_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    BadRequest:
+      description: Malformed request (`invalid_request`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Unauthorized:
+      description: Missing or invalid token (`unauthorized`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    NotFound:
+      description: Resource not found (`not_found`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Conflict:
+      description: State conflict; see `error.code`
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Unprocessable:
+      description: Validation failed (`validation_failed`); `error.fields` lists problems
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    TooManyRequests:
+      description: Rate limited (`rate_limited`); see Retry-After
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    IntegrationBroken:
+      description: Google Calendar is not connected or its token expired (`integration_disconnected` / `integration_expired`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  schemas:
+    # ── Primitives ──
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, retryable]
+          properties:
+            code:
+              type: string
+              examples: [validation_failed, integration_expired, confirmation_expired, undo_expired]
+            message: { type: string, description: 'Human-readable, safe to show.' }
+            retryable: { type: boolean }
+            fields:
+              type: object
+              additionalProperties: { type: string }
+            request_id: { type: string }
+    NextCursor:
+      type: [string, 'null']
+    Category:
+      type: string
+      enum: [training, habit, study, other]
+    Channel:
+      type: string
+      enum: [push, email, sms]
+    Priority:
+      type: string
+      enum: [normal, critical]
+    ConversationKind:
+      type: string
+      enum: [chat, checkin, review, shortcut]
+    LocalTime:
+      type: string
+      pattern: '^([01]\d|2[0-3]):[0-5]\d$'
+      examples: ['07:00']
+
+    # ── Account ──
+    Me:
+      type: object
+      required: [id, display_name, timezone, settings, timezone_mismatch, endpoints]
+      properties:
+        id: { type: string, format: uuid }
+        display_name: { type: [string, 'null'], examples: [Gabe] }
+        email: { type: [string, 'null'], format: email }
+        phone:
+          type: [object, 'null']
+          required: [masked, verified]
+          properties:
+            masked: { type: string, examples: ['+1 ••• ••• 0142'] }
+            verified: { type: boolean }
+        timezone: { type: string, examples: [America/Los_Angeles] }
+        timezone_mismatch:
+          type: boolean
+          description: True when X-Device-Timezone differs from `timezone` (D-37).
+        endpoints:
+          type: object
+          required: [chat_base_url, shortcut_url]
+          description: Service URLs the app must not hard-code (D-38).
+          properties:
+            chat_base_url:
+              type: string
+              format: uri
+              examples: ['https://abc123exampleurlid.lambda-url.us-west-2.on.aws']
+            shortcut_url:
+              type: string
+              format: uri
+              description: Full POST /shortcut/message URL, shown in Settings for the Siri Shortcut.
+        settings: { $ref: '#/components/schemas/Settings' }
+    Settings:
+      type: object
+      required: [checkin, voice, channels_enabled]
+      properties:
+        checkin:
+          type: object
+          required: [time, channels, quiet_if_empty]
+          properties:
+            time: { $ref: '#/components/schemas/LocalTime' }
+            channels:
+              type: array
+              items: { $ref: '#/components/schemas/Channel' }
+            quiet_if_empty: { type: boolean, description: '"Skip when nothing is scheduled"' }
+        voice:
+          type: object
+          required: [readback_mode, autosend]
+          properties:
+            readback_mode: { type: string, enum: ['off', voice_only, always] }
+            autosend: { type: boolean }
+        channels_enabled:
+          type: object
+          description: Global per-channel switches (D-24).
+          required: [push, email, sms]
+          properties:
+            push: { type: boolean }
+            email: { type: boolean }
+            sms: { type: boolean }
+    SettingsPatch:
+      type: object
+      description: Any subset; nested objects merge.
+      properties:
+        display_name: { type: string, maxLength: 60 }
+        timezone: { type: string }
+        checkin:
+          type: object
+          properties:
+            time: { $ref: '#/components/schemas/LocalTime' }
+            channels:
+              type: array
+              items: { $ref: '#/components/schemas/Channel' }
+            quiet_if_empty: { type: boolean }
+        voice:
+          type: object
+          properties:
+            readback_mode: { type: string, enum: ['off', voice_only, always] }
+            autosend: { type: boolean }
+        channels_enabled:
+          type: object
+          properties:
+            push: { type: boolean }
+            email: { type: boolean }
+            sms: { type: boolean }
+    Device:
+      type: object
+      required: [id, platform, last_seen_at]
+      properties:
+        id: { type: string, format: uuid }
+        platform: { type: string, enum: [ios, android] }
+        app_version: { type: [string, 'null'] }
+        last_seen_at: { type: string, format: date-time }
+    Vocabulary:
+      type: object
+      required: [custom, derived, terms]
+      properties:
+        custom:
+          type: array
+          description: User-managed hints (editable in S9).
+          items: { type: string }
+          examples: [[RPE, Escrima]]
+        derived:
+          type: array
+          description: Activity, list, and chore names and aliases, ranked by use.
+          items: { type: string }
+        terms:
+          type: array
+          description: Merged list to pass to the recognizer (custom first), max 100.
+          items: { type: string }
+
+    # ── Integrations ──
+    Integration:
+      type: object
+      required: [provider, status]
+      properties:
+        provider: { type: string, enum: [google] }
+        status: { type: string, enum: [connected, expired, disconnected] }
+        account_email: { type: [string, 'null'] }
+        calendar_ids:
+          type: array
+          items: { type: string }
+        connected_at: { type: [string, 'null'], format: date-time }
+        last_synced_at: { type: [string, 'null'], format: date-time, description: '"Synced 2 min ago"' }
+        last_error:
+          type: [object, 'null']
+          description: '"Access expired today at 8:12 AM"'
+          properties:
+            at: { type: string, format: date-time }
+            code: { type: string, examples: [invalid_grant] }
+            message: { type: string }
+    ShortcutToken:
+      type: object
+      required: [id, display, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        label: { type: [string, 'null'] }
+        display: { type: string, examples: ['pa_•••• 7Q2F'] }
+        created_at: { type: string, format: date-time }
+        last_used_at: { type: [string, 'null'], format: date-time }
+    ShortcutTokenCreated:
+      allOf:
+        - $ref: '#/components/schemas/ShortcutToken'
+        - type: object
+          required: [token]
+          properties:
+            token:
+              type: string
+              description: Plaintext token. Returned only once; never retrievable again.
+
+    # ── Today and calendar ──
+    Today:
+      type: object
+      required: [date, greeting, checkin, schedule, due, habits]
+      properties:
+        date: { type: string, format: date }
+        greeting:
+          type: string
+          description: Server-chosen by local time of day.
+          examples: ['Good morning, Gabe']
+        checkin: { $ref: '#/components/schemas/CheckinSummary' }
+        schedule:
+          type: object
+          required: [calendar_status, events]
+          properties:
+            calendar_status:
+              type: string
+              enum: [connected, not_connected, expired, error]
+              description: Drives the "Google Calendar isn't connected" state (PDF p.11).
+            events:
+              type: array
+              items: { $ref: '#/components/schemas/CalendarEvent' }
+        due:
+          type: object
+          required: [open_count, items]
+          properties:
+            open_count: { type: integer, examples: [3] }
+            items:
+              type: array
+              description: Critical first, then overdue, then by due time.
+              items: { $ref: '#/components/schemas/DueItem' }
+        habits:
+          type: array
+          items: { $ref: '#/components/schemas/HabitChip' }
+    CheckinSummary:
+      type: object
+      required: [status, top_items]
+      properties:
+        status:
+          type: string
+          enum: [sent, skipped, not_sent, failed]
+          description: not_sent = before check-in time; top_items come from a live digest (D-11).
+        sent_at: { type: [string, 'null'], format: date-time }
+        conversation_id: { type: [string, 'null'], format: uuid }
+        top_items:
+          type: array
+          maxItems: 3
+          items: { $ref: '#/components/schemas/DigestItem' }
+    DigestItem:
+      type: object
+      required: [rank, kind, text, critical]
+      properties:
+        rank: { type: integer, minimum: 1, maximum: 7 }
+        kind:
+          type: string
+          enum: [reminder, event, chore_overdue, chore_due, streak_at_risk, note_reminder, integration_warning]
+        text:
+          type: string
+          description: Display line rendered by the server (deterministic, not model output).
+          examples: ['Car registration is due today']
+        detail:
+          type: [string, 'null']
+          description: Right-aligned meta in S10 ("6:00 PM · Downtown gym", "Chore").
+        critical: { type: boolean }
+        ref:
+          $ref: '#/components/schemas/EntityRef'
+    EntityRef:
+      type: [object, 'null']
+      required: [type, id]
+      properties:
+        type: { type: string, enum: [reminder, event, chore, activity, note] }
+        id: { type: string }
+    CalendarEvent:
+      type: object
+      required: [id, title, start, end, all_day, category]
+      properties:
+        id: { type: string, description: 'Google event id' }
+        calendar_id: { type: string }
+        title: { type: string }
+        start: { type: string, format: date-time }
+        end: { type: string, format: date-time }
+        all_day: { type: boolean }
+        location: { type: [string, 'null'] }
+        description: { type: [string, 'null'] }
+        category:
+          $ref: '#/components/schemas/Category'
+        activity_id:
+          type: [string, 'null']
+          format: uuid
+          description: Matched activity (D-9).
+        done:
+          type: boolean
+          description: A log entry for the matched activity exists on this local date ("Habit · Done").
+        html_link: { type: [string, 'null'], format: uri, description: 'Opens in Google Calendar' }
+    DueItem:
+      type: object
+      required: [type, id, title, critical]
+      properties:
+        type: { type: string, enum: [reminder, chore] }
+        id: { type: string, format: uuid }
+        title: { type: string, examples: [Car registration] }
+        due_at: { type: string, format: date-time }
+        critical: { type: boolean }
+        overdue_days:
+          type: integer
+          description: 0 when due today; > 0 renders "2 days overdue" in warning style.
+        completed_at: { type: [string, 'null'], format: date-time }
+    HabitChip:
+      type: object
+      required: [activity_id, name, category, done_today, streak_current]
+      properties:
+        activity_id: { type: string, format: uuid }
+        name: { type: string, examples: [Breathing] }
+        category:
+          $ref: '#/components/schemas/Category'
+          description: Colors the chip dot; a habit can be in any category (D-5).
+        done_today: { type: boolean }
+        today_entry_id:
+          type: [string, 'null']
+          format: uuid
+          description: Lets a second tap undo today's log (DELETE /log-entries/{id}).
+        streak_current: { type: integer, examples: [12] }
+        streak_longest: { type: integer }
+        at_risk: { type: boolean, description: 'Active streak that breaks if not logged today' }
+
+    # ── Check-ins ──
+    Checkin:
+      type: object
+      required: [date, status, items]
+      properties:
+        date: { type: string, format: date }
+        status: { type: string, enum: [pending, sent, skipped, failed] }
+        sent_at: { type: [string, 'null'], format: date-time }
+        items:
+          type: array
+          maxItems: 7
+          items: { $ref: '#/components/schemas/DigestItem' }
+        heads_up: { type: [string, 'null'], examples: ['Clean bathroom is 2 days overdue'] }
+        yesterday: { type: [string, 'null'], examples: ['90 min training, 40 min study, 3 of 4 habits.'] }
+        message:
+          type: [string, 'null']
+          description: The full model-written check-in text (email body).
+        conversation_id: { type: [string, 'null'], format: uuid }
+        deliveries:
+          type: array
+          items: { $ref: '#/components/schemas/Delivery' }
+
+    # ── Chat ──
+    Conversation:
+      type: object
+      required: [id, kind, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { $ref: '#/components/schemas/ConversationKind' }
+        title:
+          type: [string, 'null']
+          description: Null until the first assistant reply has been titled (D-42).
+          examples: [Muay Thai log and capoeira move]
+        title_source: { type: string, enum: [auto, user, fixed] }
+        checkin_date: { type: [string, 'null'], format: date }
+        is_current:
+          type: boolean
+          description: The conversation with the most recent user message ("Current" badge, D-40).
+        last_message_at: { type: [string, 'null'], format: date-time }
+        last_message_preview:
+          type: [string, 'null']
+          description: One line of display text (never tool output), max 140 chars.
+          examples: ["Here's the change. Confirm?"]
+        last_message_role:
+          type: [string, 'null']
+          enum: [user, assistant, null]
+          description: 'When `user`, render the preview as "You: …".'
+        change_summary:
+          type: array
+          description: Chips summarizing what the conversation changed (D-41), in display order.
+          items: { $ref: '#/components/schemas/ChangeChip' }
+        pending_count:
+          type: integer
+          description: Cards waiting for confirmation ("1 waiting for you", "1 change waiting").
+        has_changes: { type: boolean }
+        created_at: { type: string, format: date-time }
+    ChangeChip:
+      type: object
+      required: [kind, outcome, count, label]
+      properties:
+        kind: { type: string, enum: [event, log_entry, reminder, note, list_change, chore] }
+        outcome:
+          type: string
+          enum: [saved, pending, not_added, undone, failed]
+          description: '`saved` covers saved and confirmed cards; `not_added` covers cancelled and expired ones.'
+        count:
+          type: integer
+          description: Entities affected (list items, not cards).
+        label:
+          type: string
+          description: Server-rendered chip text.
+          examples: ['1 logged', '5 items added', '1 waiting for you', '1 not added']
+    ChatHome:
+      type: object
+      required: [resume_conversation, recent, suggestions, resume_window_minutes]
+      properties:
+        resume_conversation:
+          oneOf:
+            - $ref: '#/components/schemas/Conversation'
+            - type: 'null'
+          description: The current conversation if it is inside the resume window (Q-2), else null.
+        recent:
+          type: array
+          maxItems: 2
+          description: '"Continue a recent chat" rows (p.15).'
+          items: { $ref: '#/components/schemas/Conversation' }
+        suggestions:
+          type: array
+          items: { type: string }
+          examples: [["What's on today?", 'How was my training this week?', 'Add eggs to groceries', 'Remind me at 5 to call the shop']]
+        resume_window_minutes: { type: integer, examples: [240] }
+    TextHighlight:
+      type: object
+      required: [start, end]
+      description: UTF-16 code-unit offsets into the snippet, end exclusive (matches JS string indexing).
+      properties:
+        start: { type: integer, minimum: 0 }
+        end: { type: integer, minimum: 0 }
+    HistorySearchResult:
+      type: object
+      required: [query, chats, notes, chat_count, note_count]
+      properties:
+        query: { type: string }
+        chat_count: { type: integer, description: '"2 chats and 1 note"' }
+        note_count: { type: integer }
+        chats:
+          type: array
+          description: Best-matching message per conversation, by relevance.
+          items:
+            type: object
+            required: [conversation, message_id, snippet, snippet_role, highlights, sent_at]
+            properties:
+              conversation: { $ref: '#/components/schemas/Conversation' }
+              message_id:
+                type: string
+                format: uuid
+                description: Open the conversation scrolled to this message.
+              sent_at: { type: string, format: date-time }
+              snippet: { type: string, examples: ['Shop says rotors are fine, pads need replacing.'] }
+              snippet_role: { type: string, enum: [user, assistant] }
+              highlights:
+                type: array
+                description: Empty when the hit matched only by meaning.
+                items: { $ref: '#/components/schemas/TextHighlight' }
+              score: { type: number }
+        notes:
+          type: array
+          items:
+            type: object
+            required: [note, snippet, highlights]
+            properties:
+              note: { $ref: '#/components/schemas/NoteSummary' }
+              snippet: { type: string, examples: ['Rotors measured within spec, no resurfacing needed'] }
+              highlights:
+                type: array
+                items: { $ref: '#/components/schemas/TextHighlight' }
+              score: { type: number }
+    SendMessageRequest:
+      type: object
+      required: [client_message_id, text]
+      properties:
+        client_message_id:
+          type: string
+          format: uuid
+          description: Generated when the user taps send; reused on retry or offline replay.
+        text: { type: string, minLength: 1, maxLength: 4000 }
+        input_mode: { type: string, enum: [text, voice], default: text }
+        sent_at:
+          type: string
+          format: date-time
+          description: When the user tapped send (matters for queued offline messages).
+        context:
+          description: Screen context for "Ask about…" buttons (D-17). Resolved server-side as data.
+          oneOf:
+            - type: object
+              required: [type]
+              properties:
+                type: { const: today }
+                date: { type: string, format: date }
+            - type: object
+              required: [type, period]
+              properties:
+                type: { const: insights }
+                period: { type: string, enum: [week, month, custom] }
+                start: { type: string, format: date }
+                end: { type: string, format: date }
+            - type: object
+              required: [type, note_id]
+              properties:
+                type: { const: note }
+                note_id: { type: string, format: uuid }
+    ChatMessage:
+      type: object
+      required: [id, role, created_at, blocks]
+      properties:
+        id: { type: string, format: uuid }
+        client_message_id: { type: [string, 'null'], format: uuid }
+        role: { type: string, enum: [user, assistant] }
+        input_mode: { type: string, enum: [text, voice] }
+        created_at: { type: string, format: date-time }
+        status: { type: string, enum: [complete, failed] }
+        blocks:
+          type: array
+          items: { $ref: '#/components/schemas/MessageBlock' }
+        spoken_text:
+          type: [string, 'null']
+          description: Read-back sentence (INV-9). Present on assistant messages when read-back applies.
+        suggestions:
+          type: array
+          description: Reply chips (PDF p.47).
+          items: { type: string }
+    MessageBlock:
+      oneOf:
+        - type: object
+          required: [type, text]
+          properties:
+            type: { const: text }
+            text: { type: string, description: 'Light markdown (bold, lists, line breaks).' }
+        - type: object
+          required: [type, card]
+          properties:
+            type: { const: action_card }
+            card: { $ref: '#/components/schemas/ActionCard' }
+        - type: object
+          required: [type, checkin]
+          properties:
+            type: { const: checkin }
+            checkin: { $ref: '#/components/schemas/Checkin' }
+      discriminator:
+        propertyName: type
+    ActionCard:
+      type: object
+      description: Structured record of something the assistant did or proposes (C3, D-13).
+      required: [id, kind, state, data, actions]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [event, log_entry, reminder, note, list_change, chore] }
+        state:
+          type: string
+          enum: [saved, pending_confirmation, confirmed, cancelled, expired, undone, failed]
+        data:
+          description: Typed payload; shape depends on `kind`.
+          oneOf:
+            - $ref: '#/components/schemas/EventCardData'
+            - $ref: '#/components/schemas/LogEntry'
+            - $ref: '#/components/schemas/Reminder'
+            - $ref: '#/components/schemas/NoteSummary'
+            - $ref: '#/components/schemas/ListChangeCardData'
+            - $ref: '#/components/schemas/ChoreCardData'
+        actions:
+          type: array
+          description: |
+            Buttons to render now. `edit` opens the entity's native sheet (e.g. the reminder
+            sheet, p.61); `renew` is "Add now" on an expired calendar card (D-46).
+          items: { type: string, enum: [confirm, cancel, undo, open, edit, renew] }
+        entity_status:
+          type: [string, 'null']
+          description: |
+            Live state of what the card created, resolved when read (D-45). Reminder:
+            upcoming | sent | completed | cancelled. Log entry, note, list item, chore:
+            active | deleted. Event: last known state, scheduled | deleted.
+          examples: [upcoming]
+        spoken_caption:
+          type: [string, 'null']
+          description: Caption under the card (BRIEF §6), e.g. "Logged 60 minutes of Muay Thai, training, today at 6 PM."
+        undo_expires_at: { type: [string, 'null'], format: date-time }
+        confirm_expires_at: { type: [string, 'null'], format: date-time }
+        error: { type: [string, 'null'], description: 'Human message when state = failed' }
+    EventCardData:
+      type: object
+      required: [operation, title, start, end]
+      properties:
+        operation: { type: string, enum: [create, update, delete] }
+        event_id: { type: [string, 'null'] }
+        title: { type: string, examples: [Capoeira] }
+        category: { $ref: '#/components/schemas/Category' }
+        start: { type: string, format: date-time }
+        end: { type: string, format: date-time }
+        location: { type: [string, 'null'] }
+        previous:
+          type: [object, 'null']
+          description: Values before an update, for the struck-through display (PDF p.13).
+          properties:
+            title: { type: string }
+            start: { type: string, format: date-time }
+            end: { type: string, format: date-time }
+            location: { type: [string, 'null'] }
+    ListChangeCardData:
+      type: object
+      required: [list_id, list_name, added, checked, removed]
+      properties:
+        list_id: { type: string, format: uuid }
+        list_name: { type: string }
+        added:
+          type: array
+          items: { $ref: '#/components/schemas/ListItem' }
+        checked:
+          type: array
+          items: { $ref: '#/components/schemas/ListItem' }
+        removed:
+          type: array
+          items: { $ref: '#/components/schemas/ListItem' }
+    ChoreCardData:
+      type: object
+      required: [operation, chore]
+      properties:
+        operation: { type: string, enum: [created, completed, skipped, updated] }
+        chore: { $ref: '#/components/schemas/Chore' }
+    CardActionResult:
+      type: object
+      required: [card]
+      properties:
+        card: { $ref: '#/components/schemas/ActionCard' }
+        message:
+          oneOf:
+            - $ref: '#/components/schemas/ChatMessage'
+            - type: 'null'
+          description: Assistant follow-up appended to the conversation (e.g. "Moved Capoeira to 7:00 PM."), with spoken_text.
+    TurnResult:
+      type: object
+      required: [user_message, assistant_message, conversation]
+      properties:
+        conversation: { $ref: '#/components/schemas/Conversation' }
+        user_message: { $ref: '#/components/schemas/ChatMessage' }
+        assistant_message: { $ref: '#/components/schemas/ChatMessage' }
+        display_text: { type: string }
+        spoken_text: { type: [string, 'null'] }
+    ChatStreamEvent:
+      description: One SSE event. The SSE `event:` field equals `type`.
+      oneOf:
+        - type: object
+          required: [type, user_message_id, assistant_message_id]
+          properties:
+            type: { const: turn.started }
+            user_message_id: { type: string, format: uuid }
+            assistant_message_id: { type: string, format: uuid }
+        - type: object
+          required: [type, label]
+          properties:
+            type: { const: status }
+            label: { type: string, examples: ["Checking your calendar…"] }
+            tool: { type: string, description: 'Tool name, for analytics only' }
+        - type: object
+          required: [type, text]
+          properties:
+            type: { const: text.delta }
+            text: { type: string }
+        - type: object
+          required: [type, card]
+          properties:
+            type: { const: card }
+            card: { $ref: '#/components/schemas/ActionCard' }
+        - type: object
+          required: [type, message, conversation]
+          properties:
+            type: { const: turn.completed }
+            message: { $ref: '#/components/schemas/ChatMessage' }
+            conversation:
+              $ref: '#/components/schemas/Conversation'
+              description: Updated metadata (title after the first reply, change_summary, pending_count).
+        - type: object
+          required: [type, error]
+          properties:
+            type: { const: error }
+            error: { $ref: '#/components/schemas/ErrorResponse/properties/error' }
+      discriminator:
+        propertyName: type
+
+    # ── Logging ──
+    MetricField:
+      type: object
+      required: [key, label, type]
+      properties:
+        key: { type: string, examples: [rounds] }
+        label: { type: string, examples: [Rounds] }
+        type: { type: string, enum: [integer, number, text, scale, distance] }
+        unit: { type: [string, 'null'], examples: [km, mi] }
+        min: { type: [number, 'null'] }
+        max: { type: [number, 'null'] }
+        scale_labels:
+          type: [object, 'null']
+          description: For `scale`, e.g. {"1":"Easy","7":"Hard","10":"Max"}.
+          additionalProperties: { type: string }
+    Activity:
+      type: object
+      required: [id, name, category, is_favorite, sort_order, metric_fields]
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string, examples: [muay_thai] }
+        name: { type: string, examples: [Muay Thai] }
+        category: { $ref: '#/components/schemas/Category' }
+        aliases:
+          type: array
+          items: { type: string }
+        icon: { type: [string, 'null'], examples: [boxing-glove] }
+        is_favorite: { type: boolean }
+        sort_order: { type: integer }
+        default_duration_min:
+          type: [integer, 'null']
+          description: Configured default, else the last logged duration (D-7).
+        metric_fields:
+          type: array
+          items: { $ref: '#/components/schemas/MetricField' }
+        last_logged_at: { type: [string, 'null'], format: date-time }
+        last_duration_min: { type: [integer, 'null'] }
+        habit:
+          type: [object, 'null']
+          description: Present when the activity is a habit (non-null habit_target), in any category (D-5).
+          properties:
+            target:
+              type: object
+              properties:
+                per: { type: string, enum: [day] }
+                times: { type: integer, default: 1 }
+            done_today: { type: boolean }
+            streak_current: { type: integer }
+            streak_longest: { type: integer }
+        archived_at: { type: [string, 'null'], format: date-time }
+    ActivityCreate:
+      type: object
+      required: [name, category]
+      properties:
+        habit_target:
+          type: [object, 'null']
+          description: Set to make the activity a habit (V1 supports daily only, Q-4).
+          properties:
+            per: { type: string, enum: [day] }
+            times: { type: integer, default: 1 }
+        name: { type: string, minLength: 1, maxLength: 60 }
+        category: { $ref: '#/components/schemas/Category' }
+        aliases:
+          type: array
+          items: { type: string }
+        icon: { type: string }
+        is_favorite: { type: boolean, default: true }
+        default_duration_min: { type: integer, minimum: 1, maximum: 1440 }
+        metric_fields:
+          type: array
+          items: { $ref: '#/components/schemas/MetricField' }
+    ActivityPatch:
+      type: object
+      properties:
+        habit_target:
+          type: [object, 'null']
+          description: Set to make it a habit; null to stop tracking it as one.
+          properties:
+            per: { type: string, enum: [day] }
+            times: { type: integer, default: 1 }
+        name: { type: string, minLength: 1, maxLength: 60 }
+        aliases:
+          type: array
+          items: { type: string }
+        icon: { type: string }
+        is_favorite: { type: boolean }
+        default_duration_min: { type: [integer, 'null'], minimum: 1, maximum: 1440 }
+        metric_fields:
+          type: array
+          items: { $ref: '#/components/schemas/MetricField' }
+    LogEntry:
+      type: object
+      required: [id, activity_id, activity_name, category, started_at]
+      properties:
+        id: { type: string, format: uuid }
+        activity_id: { type: string, format: uuid }
+        activity_name: { type: string, examples: [Muay Thai] }
+        category: { $ref: '#/components/schemas/Category' }
+        variant: { type: [string, 'null'], examples: [sparring] }
+        started_at: { type: string, format: date-time }
+        duration_min: { type: [integer, 'null'] }
+        metrics:
+          type: object
+          additionalProperties: true
+          examples: [{ rounds: 6, rpe: 7 }]
+        tags:
+          type: array
+          items: { type: string }
+        note: { type: [string, 'null'], examples: [Felt strong] }
+        source: { type: string, enum: [chat, quick_log, habit_chip, shortcut] }
+        created_at: { type: string, format: date-time }
+    LogEntryCreate:
+      type: object
+      description: Provide `activity_id`, or `activity_name` + `category` (creates the activity if new).
+      properties:
+        activity_id: { type: string, format: uuid }
+        activity_name: { type: string, maxLength: 60 }
+        category: { $ref: '#/components/schemas/Category' }
+        variant: { type: string, maxLength: 40 }
+        started_at: { type: string, format: date-time, description: 'Defaults to now.' }
+        duration_min: { type: integer, minimum: 1, maximum: 1440 }
+        metrics:
+          type: object
+          additionalProperties: true
+        tags:
+          type: array
+          items: { type: string }
+        note: { type: string, maxLength: 2000 }
+        source: { type: string, enum: [quick_log, habit_chip], default: quick_log }
+    LogEntryPatch:
+      type: object
+      properties:
+        variant: { type: [string, 'null'], maxLength: 40 }
+        started_at: { type: string, format: date-time }
+        duration_min: { type: [integer, 'null'], minimum: 1, maximum: 1440 }
+        metrics:
+          type: object
+          additionalProperties: true
+        tags:
+          type: array
+          items: { type: string }
+        note: { type: [string, 'null'], maxLength: 2000 }
+
+    # ── Insights ──
+    MetricValue:
+      type: object
+      required: [value, previous, change]
+      properties:
+        value:
+          type: [number, 'null']
+          description: Minutes for durations, count for sessions, 0–100 for habit rate. Null when insufficient.
+        previous: { type: [number, 'null'], description: 'Null renders "No last week yet".' }
+        change:
+          type: [object, 'null']
+          required: [kind, value]
+          properties:
+            kind:
+              type: string
+              enum: [percent, absolute, points]
+              description: percent → "+12%", absolute → "+1", points → "+5 pts".
+            value: { type: number }
+        note:
+          type: [string, 'null']
+          description: Status text when value is null, e.g. "Needs 3 days".
+    Insights:
+      type: object
+      required: [period, range, comparison_range, comparison_label, sufficiency, metrics, daily, categories_present, habit_grid, breakdown_category, breakdown, summary_text]
+      properties:
+        period: { type: string, enum: [week, month, custom] }
+        range:
+          type: object
+          required: [start, end, elapsed_end]
+          properties:
+            start: { type: string, format: date }
+            end: { type: string, format: date }
+            elapsed_end:
+              type: string
+              format: date
+              description: Last elapsed day in range (today if the period is current, else `end`).
+        comparison_range:
+          type: [object, 'null']
+          description: |
+            The full previous period (D-39): previous Mon–Sun week, previous calendar month,
+            or the equal-length range ending the day before `start`. Null when the user's
+            first log is after it ends ("first week").
+          properties:
+            start: { type: string, format: date }
+            end: { type: string, format: date }
+        comparison_label:
+          type: string
+          enum: [last week, last month, previous period]
+          description: Suffix for tile deltas ("+12% vs last week") and the "No … yet" state.
+        sufficiency:
+          type: object
+          required: [days_logged, days_required, sufficient]
+          properties:
+            days_logged: { type: integer, examples: [2] }
+            days_required: { type: integer, examples: [3] }
+            sufficient: { type: boolean, description: 'False renders "Not enough data yet" with "2 of 3 days" (p.25).' }
+        metrics:
+          type: object
+          required: [training_minutes, training_sessions, study_minutes, habit_completion_pct]
+          properties:
+            training_minutes: { $ref: '#/components/schemas/MetricValue' }
+            training_sessions: { $ref: '#/components/schemas/MetricValue' }
+            study_minutes: { $ref: '#/components/schemas/MetricValue' }
+            habit_completion_pct:
+              $ref: '#/components/schemas/MetricValue'
+              description: Unrounded percentage (Q-5a); the client rounds for display.
+        daily:
+          type: array
+          description: One row per day in range ("Minutes per day", p.4). Empty when not sufficient.
+          items:
+            type: object
+            required: [date, minutes, total_minutes]
+            properties:
+              date: { type: string, format: date }
+              minutes:
+                type: object
+                required: [training, habit, study, other]
+                properties:
+                  training: { type: integer }
+                  habit: { type: integer }
+                  study: { type: integer }
+                  other: { type: integer }
+              total_minutes:
+                type: integer
+                description: Label above each bar (95, 140, …).
+        categories_present:
+          type: array
+          description: Categories with any minutes in range, in legend order. Drives the chart legend.
+          items: { $ref: '#/components/schemas/Category' }
+          examples: [[training, habit, study]]
+        habit_grid:
+          type: object
+          required: [days, rows, completed, possible]
+          properties:
+            completed: { type: integer, description: '"18 of 21 done"', examples: [18] }
+            possible: { type: integer, examples: [21] }
+            days:
+              type: array
+              items: { type: string, format: date }
+            rows:
+              type: array
+              items:
+                type: object
+                required: [activity_id, name, category, cells]
+                properties:
+                  activity_id: { type: string, format: uuid }
+                  name: { type: string, examples: [Language practice] }
+                  category:
+                    $ref: '#/components/schemas/Category'
+                    description: Cell fill color (Language practice uses study, p.4).
+                  cells:
+                    type: array
+                    description: Aligned with `days`; null = future day or before the habit existed.
+                    items: { type: [boolean, 'null'] }
+        breakdown_category:
+          $ref: '#/components/schemas/Category'
+          description: Category covered by `breakdown` (default training, Q-5c).
+        breakdown:
+          type: array
+          description: '"Time per activity", sorted by minutes descending.'
+          items:
+            type: object
+            required: [activity_id, name, category, minutes, sessions, share]
+            properties:
+              activity_id: { type: string, format: uuid }
+              name: { type: string, examples: [Muay Thai] }
+              category: { $ref: '#/components/schemas/Category' }
+              minutes: { type: integer, examples: [180] }
+              sessions: { type: integer, examples: [3] }
+              share:
+                type: number
+                minimum: 0
+                maximum: 1
+                description: minutes ÷ largest row's minutes (bar length).
+        summary_text:
+          type: string
+          description: Accessible text alternative for the charts (BRIEF §8). Deterministic, not model-written.
+
+    # ── Lists ──
+    List:
+      type: object
+      required: [id, name, open_count, checked_count, sort_order]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, examples: [Groceries] }
+        open_count: { type: integer, examples: [5] }
+        checked_count: { type: integer, examples: [4] }
+        sort_order: { type: integer }
+    ListItem:
+      type: object
+      required: [id, text, checked]
+      properties:
+        id: { type: string, format: uuid }
+        text: { type: string, examples: [Eggs] }
+        quantity: { type: [string, 'null'], examples: ['12'] }
+        checked: { type: boolean }
+        checked_at: { type: [string, 'null'], format: date-time }
+        created_at: { type: string, format: date-time }
+    ListWithItems:
+      allOf:
+        - $ref: '#/components/schemas/List'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              description: Unchecked by created_at, then checked by checked_at desc.
+              items: { $ref: '#/components/schemas/ListItem' }
+
+    # ── Chores ──
+    Chore:
+      type: object
+      required: [id, name, rrule, recurrence_text, next_due_at, due_group, overdue_days, remind]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, examples: [Clean bathroom] }
+        rrule: { type: string, examples: ['FREQ=WEEKLY;BYDAY=SA'] }
+        recurrence_text: { type: string, examples: [Every Saturday] }
+        next_due_at: { type: string, format: date-time }
+        last_done_at: { type: [string, 'null'], format: date-time }
+        due_group: { type: string, enum: [overdue, today, this_week, later] }
+        overdue_days: { type: integer }
+        remind: { type: boolean }
+        remind_time: { oneOf: [{ $ref: '#/components/schemas/LocalTime' }, { type: 'null' }] }
+    ChoreCreate:
+      type: object
+      required: [name, rrule]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 80 }
+        rrule: { type: string, description: 'RFC 5545 RRULE without DTSTART.' }
+        first_due_date: { type: string, format: date, description: 'Defaults to the next occurrence.' }
+        remind: { type: boolean, default: true }
+        remind_time: { $ref: '#/components/schemas/LocalTime' }
+    ChorePatch:
+      type: object
+      properties:
+        name: { type: string, minLength: 1, maxLength: 80 }
+        rrule: { type: string }
+        next_due_date: { type: string, format: date }
+        remind: { type: boolean }
+        remind_time: { oneOf: [{ $ref: '#/components/schemas/LocalTime' }, { type: 'null' }] }
+    ChoreEventResult:
+      type: object
+      required: [event_id, kind, chore, undo_expires_at]
+      properties:
+        event_id: { type: string, format: uuid, description: 'Pass to DELETE /chores/{id}/events/{event_id} to undo.' }
+        kind: { type: string, enum: [done, skipped] }
+        chore: { $ref: '#/components/schemas/Chore' }
+        undo_expires_at: { type: string, format: date-time }
+
+    # ── Reminders ──
+    Delivery:
+      type: object
+      required: [channel, status, attempted_at]
+      properties:
+        channel: { $ref: '#/components/schemas/Channel' }
+        status: { type: string, enum: [sent, failed, skipped] }
+        error_code: { type: [string, 'null'] }
+        error_message: { type: [string, 'null'], examples: [SMS not delivered.] }
+        attempted_at: { type: string, format: date-time }
+    Reminder:
+      type: object
+      required: [id, message, fire_at, channels, priority, status]
+      properties:
+        id: { type: string, format: uuid }
+        message: { type: string, examples: [Car registration due today] }
+        fire_at: { type: string, format: date-time }
+        channels:
+          type: array
+          description: Effective channels after defaults and global switches.
+          items: { $ref: '#/components/schemas/Channel' }
+        priority: { $ref: '#/components/schemas/Priority' }
+        status: { type: string, enum: [scheduled, sent, failed, cancelled] }
+        partial_failure: { type: boolean, description: 'Sent on some channels, failed on others.' }
+        completed_at: { type: [string, 'null'], format: date-time }
+        snooze_count: { type: integer }
+        sent_at: { type: [string, 'null'], format: date-time }
+        note: { type: [object, 'null'], properties: { id: { type: string, format: uuid }, title: { type: [string, 'null'] } } }
+        event_id: { type: [string, 'null'] }
+        chore_id: { type: [string, 'null'], format: uuid }
+        deliveries:
+          type: array
+          items: { $ref: '#/components/schemas/Delivery' }
+        created_at: { type: string, format: date-time }
+    ReminderCreate:
+      type: object
+      required: [message, fire_at]
+      properties:
+        message: { type: string, minLength: 1, maxLength: 300 }
+        fire_at: { type: string, format: date-time, description: 'Must be in the future.' }
+        channels:
+          type: array
+          description: Omit for defaults (normal → push; critical → push + SMS).
+          items: { $ref: '#/components/schemas/Channel' }
+        priority: { $ref: '#/components/schemas/Priority' }
+        note_id: { type: string, format: uuid }
+        event_id: { type: string }
+    ReminderPatch:
+      type: object
+      properties:
+        message: { type: string, minLength: 1, maxLength: 300 }
+        fire_at: { type: string, format: date-time }
+        channels:
+          type: array
+          items: { $ref: '#/components/schemas/Channel' }
+        priority: { $ref: '#/components/schemas/Priority' }
+        completed: { type: boolean }
+    NotificationItem:
+      description: Reminders list row (D-21). `kind = checkin` rows are read-only history.
+      oneOf:
+        - type: object
+          required: [kind, reminder]
+          properties:
+            kind: { const: reminder }
+            reminder: { $ref: '#/components/schemas/Reminder' }
+        - type: object
+          required: [kind, checkin_date, fire_at, title, deliveries]
+          properties:
+            kind: { const: checkin }
+            checkin_date: { type: string, format: date }
+            fire_at: { type: string, format: date-time }
+            title: { type: string, examples: [Morning check-in] }
+            deliveries:
+              type: array
+              items: { $ref: '#/components/schemas/Delivery' }
+      discriminator:
+        propertyName: kind
+
+    # ── Notes ──
+    NoteReminderRef:
+      type: object
+      required: [id, message, fire_at, channels]
+      properties:
+        id: { type: string, format: uuid }
+        message: { type: string }
+        fire_at: { type: string, format: date-time }
+        channels:
+          type: array
+          items: { $ref: '#/components/schemas/Channel' }
+    NoteSummary:
+      type: object
+      required: [id, excerpt, tags, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: [string, 'null'] }
+        excerpt: { type: string, description: 'First line of the body, max ~140 chars.' }
+        tags:
+          type: array
+          items: { type: string }
+        next_reminder:
+          oneOf:
+            - $ref: '#/components/schemas/NoteReminderRef'
+            - type: 'null'
+          description: Earliest upcoming reminder (bell + date in the list).
+        score: { type: [number, 'null'], description: 'Search relevance when `q` was given.' }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    Note:
+      allOf:
+        - $ref: '#/components/schemas/NoteSummary'
+        - type: object
+          required: [body, reminders]
+          properties:
+            body: { type: string, description: 'Plain text; lines starting with "- " render as bullets (D-34).' }
+            reminders:
+              type: array
+              description: Upcoming reminders attached to this note.
+              items: { $ref: '#/components/schemas/NoteReminderRef' }
+    NoteCreate:
+      type: object
+      required: [body]
+      properties:
+        title: { type: string, maxLength: 120 }
+        body: { type: string, minLength: 1, maxLength: 20000 }
+        tags:
+          type: array
+          items: { type: string, maxLength: 30 }
+    NotePatch:
+      type: object
+      properties:
+        title: { type: [string, 'null'], maxLength: 120 }
+        body: { type: string, minLength: 1, maxLength: 20000 }
+        tags:
+          type: array
+          items: { type: string, maxLength: 30 }

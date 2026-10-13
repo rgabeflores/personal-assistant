@@ -53,7 +53,18 @@ The system has four layers: clients, an orchestrator that runs the Claude loop, 
 
 &#91;embedded content: system components · clients, orchestrator, tool layer, storage and delivery\]
 
-Tools are the only components that touch Postgres, Google, or the scheduler. The orchestrator and the Claude app never write data directly. Cron schedules (briefing, chore roller, weekly review) also invoke the orchestrator or small Lambdas; see section 7.
+The app reaches the backend through two entry points:
+
+| Entry point | Serves | Runs on |
+| --- | --- | --- |
+| API Gateway HTTP API (Cognito JWT authorizer) | REST routes for every screen and the fast paths (quick log, checkboxes, settings) | REST API Lambdas |
+| Lambda Function URL (`InvokeMode: RESPONSE_STREAM`, `AuthType: NONE`) | Chat turns (`POST /conversations/{id}/messages`), the iOS Shortcut (`POST /shortcut/message`), and a no-op `GET /warm` | Chat Lambda, which runs the orchestrator |
+
+The orchestrator runs in its own Chat Lambda because a turn can exceed API Gateway's 30-second limit and its text must stream to the app. The Function URL is public, so the Chat Lambda verifies the Cognito JWT, or the hashed Shortcut token, in code. Reserved concurrency caps abuse. See `planning/chat-service.md`.
+
+The Chat Lambda and the REST Lambdas run tool logic in-process from a shared service package. The MCP server exposes the same tools to external clients (the Claude app, Claude Code).
+
+Tools, and the shared services behind them, are the only components that touch Postgres, Google, or the scheduler. The orchestrator and the Claude app never write data directly. Cron schedules (briefing, chore roller, weekly review) also invoke the orchestrator or small Lambdas; see section 7.
 
 ## 4. Request flow and agent loop
 
@@ -553,7 +564,10 @@ Known gotchas:
 - **US SMS registration:** A2P 10DLC or toll-free verification is required before SMS delivers reliably.
 - **Relative dates:** "next Friday" and "tonight" are resolved by the model against INV-6. Echo the resolved absolute date in confirmations.
 - **Context growth:** send only the last 20 turns plus a rolling summary; older turns are summarized and stored.
-- **Lambda timeouts:** a multi-tool loop can exceed 30 seconds. Use API Gateway with response streaming or a Lambda function URL, and cap the loop at about 8 tool iterations.
+- **Lambda timeouts:** a multi-tool loop can exceed API Gateway's 30-second integration limit. Chat turns go through the Chat Lambda's Function URL with response streaming (section 3), which has a 300 s function timeout. Keep the loop capped at 8 tool iterations. Never route a turn-running endpoint through API Gateway.
+- **Chat Lambda cold starts:** the first turn after an idle period pays roughly 1–2 s of init. Do secret, database, and JWKS setup at module load, and have the app call `GET /warm` when the Chat tab gains focus or the mic is pressed. Add provisioned concurrency (1) only if that is not enough.
+- **Function URL is public:** reject requests without a valid JWT or Shortcut token before doing any work. Keep reserved concurrency low (5), since rejected calls are still billed invocations.
+- **Streaming and disconnects:** if the app disconnects mid-stream, the Chat Lambda keeps running. Finish and persist the turn, and let the app recover it by resending the same `client_message_id`. `sam local` cannot emulate response streaming, so test streaming locally through a small Node HTTP adapter.
 - Audio feedback: stop speech recognition before calling expo-speech, or the mic transcribes the app's own read-back.
 - Expo Go: expo-speech-recognition is a native module, so develop on an EAS development build from day one.
 - Speech permissions: iOS needs NSMicrophoneUsageDescription and NSSpeechRecognitionUsageDescription; Android needs RECORD\_AUDIO. Handle denial by hiding the mic button.
@@ -563,9 +577,9 @@ Known gotchas:
 
 Build in six phases; each ends with a usable assistant and a clear exit check.
 
-1. **Foundation.** SAM stack, RDS + schema, Cognito, a bare Expo app (EAS development build) with a chat screen, and the orchestrator loop with one tool (`log_entry`).
-   - Exit: log a session by chat and see the row in Postgres.
-2. **Logging and analytics (R5, R6).** `list_entries`, `get_stats`, `get_streaks`, plus quick-log buttons in the UI.
+1. **Foundation.** SAM stack, RDS + schema, Cognito, a bare Expo app (EAS development build) with a chat screen, and the orchestrator loop with one tool (`log_entry`). The orchestrator runs in the Chat Lambda behind its Function URL (`RESPONSE_STREAM`), with in-code JWT verification, reserved concurrency, and SSE streaming to the app (section 3). Include a local Node HTTP adapter for streaming tests, since `sam local` cannot emulate streaming.
+   - Exit: log a session by chat, watch the reply stream into the app, and see the row in Postgres. A request without a valid JWT is rejected.
+2. **Logging and analytics (R5, R6).** `list_entries`, `get_stats`, `get_streaks`, plus quick-log buttons in the UI. Quick log is the first fast path, so this phase also stands up the REST API: API Gateway with the Cognito JWT authorizer, in front of the REST API Lambdas, sharing the service package with the Chat Lambda.
    - Exit: "How did my training look this month?" returns correct numbers.
 3. **Calendar (R2, R3).** Google OAuth flow, token storage, the four calendar tools with confirm-first.
    - Exit: create and move an event from chat with a confirmation step.
@@ -573,4 +587,4 @@ Build in six phases; each ends with a usable assistant and a clear exit check.
    - Exit: a reminder set from chat arrives on the phone within one minute of `fire_at`.
 5. **Notes, lists, chores (R7, R8).** Notes with embeddings, lists, chores with `rrule` and the chore-roller job. Optionally add the MCP server as a custom connector in the Claude app.
    - Exit: "Add eggs and coffee to groceries" and "What chores are due this weekend?" both work.
-6. Voice (R10). Push-to-talk with expo-speech-recognition and vocabulary hints, the voice response contract, spoken read-back with expo-speech, undo\_entry, then the iOS Shortcut endpoint. Exit: saying "log 45 minutes of capoeira" is read back correctly and "undo" removes it.
+6. Voice (R10). Push-to-talk with expo-speech-recognition and vocabulary hints, the voice response contract, spoken read-back with expo-speech, undo\_entry, the app's `GET /warm` call on mic press, then the iOS Shortcut endpoint (`POST /shortcut/message` on the Chat Lambda's Function URL). Exit: saying "log 45 minutes of capoeira" is read back correctly and "undo" removes it.
