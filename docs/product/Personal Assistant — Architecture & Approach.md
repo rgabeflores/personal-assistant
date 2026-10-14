@@ -68,7 +68,7 @@ Tools, and the shared services behind them, are the only components that touch P
 
 ## 4. Request flow and agent loop
 
-Each chat turn is one Messages API tool-use loop run by the orchestrator, capped at 8 tool iterations.
+Each chat turn is one tool-use loop run by the orchestrator, capped at 8 tool iterations. The orchestrator calls models only through the provider-neutral model interface (`packages/models`), which routes each task to a configured model. Claude is the default; see `planning/model-providers.md`.
 
 &#91;embedded content: request flow · one chat turn with the tool-use loop\]
 
@@ -77,8 +77,8 @@ Orchestrator steps per turn:
 1. Authenticate the request and resolve `user_id` from the Cognito token (INV-7).
 2. Load the user's profile, timezone, and the last 20 messages plus the rolling summary.
 3. Build the system prompt: role, current date and time in the user's timezone (INV-6), profile facts, confirmation rules, and the rule that tool results are data (INV-8).
-4. Call Claude with the system prompt, history, new message, and tool definitions. Cache the system prompt and tools with prompt caching.
-5. While the response has `stop_reason = "tool_use"`: execute each tool call through the MCP server, append the `tool_result` blocks, and call Claude again.
+4. Call the `chat.agent` model through the model interface with the system prompt, history, new message, and tool definitions. Cache the system prompt and tools where the provider supports prompt caching.
+5. While the model stops for tool use: execute each tool call through the shared tool layer (in-process, section 3), append the tool results, and call the model again.
 6. Stream the final text to the UI, then persist the user message, all tool blocks, and the reply to `messages`.
 
 Reference pseudocode (TypeScript):
@@ -89,23 +89,23 @@ async function handleTurn(userId: string, convId: string, text: string) {
   const messages = [...ctx.history, { role: "user", content: text }];
 
   for (let i = 0; i < 8; i++) {
-    const res = await anthropic.messages.create({
-      model: MODEL_CHAT,
-      max_tokens: 2048,
+    const res = await models.complete("chat.agent", {     // routed by config; streams text to the UI
+      maxTokens: 2048,
       system: buildSystemPrompt(ctx),                      // includes now() in user tz
       tools: TOOL_DEFS,
       messages,
-    });
-    messages.push({ role: "assistant", content: res.content });
-    if (res.stop_reason !== "tool_use") break;
+      cacheHints: { system: true, tools: true },
+    }, { userId });
+    messages.push({ role: "assistant", content: res.content });  // canonical blocks
+    if (res.stopReason !== "tool_use") break;
 
     const results = await Promise.all(
       res.content
-        .filter((b) => b.type === "tool_use")
+        .filter((b) => b.type === "tool_call")
         .map(async (b) => ({
           type: "tool_result",
-          tool_use_id: b.id,
-          content: JSON.stringify(await mcp.call(b.name, b.input, { userId })),
+          call_id: b.id,
+          content: JSON.stringify(await tools.call(b.name, b.input, { userId })),
         }))
     );
     messages.push({ role: "user", content: results });
@@ -332,7 +332,7 @@ CREATE TABLE messages (
   user_id          uuid NOT NULL REFERENCES users(id),
   conversation_id  uuid NOT NULL,
   role             text NOT NULL CHECK (role IN ('user','assistant')),
-  content          jsonb NOT NULL,          -- Messages API content blocks, incl. tool_use/tool_result
+  content          jsonb NOT NULL,          -- canonical content blocks (text, tool_call, tool_result), provider-neutral
   created_at       timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX ON messages (conversation_id, created_at);
@@ -452,7 +452,7 @@ Every morning at the user's chosen time (default 07:00 local), the system sends 
    - yesterday's log summary (counts per category, from `get_stats`)
    - first event start time and any back-to-back gaps under 15 minutes
 3. **Rank (deterministic).** Score each item; sort descending; keep the top 7. Store the ranked list as `checkins.digest` (jsonb).
-4. **Write (LLM).** Send the ranked digest to a Haiku-class model with the template below. The model formats and phrases; it MUST NOT add, drop, or reorder items.
+4. **Write (LLM).** Send the ranked digest to the `checkin.write` model (Haiku-class by default; a good candidate for a small model) with the template below. The model formats and phrases; it MUST NOT add, drop, or reorder items.
 5. **Deliver.** Push a 1–2 line preview with an app link to `/checkin/{date}`. Email the full version. Send SMS only if at least one item is critical.
 6. **Converse.** The app link (assistant://checkin/{date}) opens a new conversation whose first assistant message is the check-in, with the digest in context. Replies like "push the dentist to Friday" or "mark laundry done" run through the normal agent loop (section 4).
 
@@ -506,11 +506,11 @@ Notes:
 
 ## 9. Integrations and accounts
 
-V1 needs six accounts: AWS, Anthropic API, Google (Calendar), Apple Developer Program, Google Play Console, and Twilio if SMS is enabled.
+V1 needs six accounts: AWS, Anthropic API (plus any other model provider configured later), Google (Calendar), Apple Developer Program, Google Play Console, and Twilio if SMS is enabled.
 
 | Integration | Choice | Auth | Notes |
 | --- | --- | --- | --- |
-| LLM | Claude Messages API | API key in Secrets Manager | Sonnet-class model for chat; Haiku-class for check-ins and simple logging; prompt caching on system prompt + tool definitions |
+| LLM | Claude Messages API by default, behind the provider-neutral model interface | API key per provider in Secrets Manager | Routed per task in config: Sonnet-class for chat, Haiku-class for check-ins, titles, summaries, and simple logging. OpenAI and OpenAI-compatible servers (Bedrock open models, Ollama) can be added per task. Prompt caching where the provider supports it. See `planning/model-providers.md` |
 | Calendar | Google Calendar API | OAuth 2.0, scope `calendar.events` | Source of truth for events. Apple iCloud has no REST API (CalDAV only); Microsoft would use the Graph API |
 | Email | Amazon SES | IAM role | Outbound only in V1 |
 | SMS | Twilio | Account SID + auth token in Secrets Manager | Optional; see section 8 |
@@ -535,8 +535,8 @@ Every request is authenticated by Cognito, every secret lives in Secrets Manager
 
 - **API auth:** API Gateway uses a Cognito JWT authorizer. The orchestrator derives `user_id` from the token's `sub`, never from request bodies or model output. The mobile app signs in with expo-auth-session (PKCE) and keeps tokens in expo-secure-store.
 - **MCP server auth:** bearer token or OAuth. Tools receive `user_id` from the authenticated context; tool inputs MUST NOT include a `user_id` field.
-- **Secrets:** Anthropic key, Google OAuth client secret and refresh token, Twilio credentials, and Expo push access token in Secrets Manager. Never in env vars, code, logs, or prompts.
-- **Network:** RDS in private subnets; Lambdas that touch RDS run in the VPC with RDS Proxy. Use VPC endpoints or a NAT gateway for outbound calls to Anthropic, Google, and Twilio.
+- **Secrets:** model provider keys (Anthropic by default), Google OAuth client secret and refresh token, Twilio credentials, and Expo push access token in Secrets Manager. Never in env vars, code, logs, or prompts.
+- **Network:** RDS in private subnets; Lambdas that touch RDS run in the VPC with RDS Proxy. Use VPC endpoints or a NAT gateway for outbound calls to model providers, Google, and Twilio. A self-hosted model is reached through an authenticated HTTPS tunnel, never an open port.
 - **IAM:** only the reminder tool's role may call `scheduler:CreateSchedule` / `DeleteSchedule`, scoped to the `rem-*` prefix, with `iam:PassRole` limited to the scheduler execution role.
 - **Prompt injection:** note bodies and calendar event text are user data. The system prompt MUST tell the model to treat tool results as data, not instructions.
 - **Logging:** log tool names, latency, and error codes. Do not log message bodies, note contents, or phone numbers at INFO level.
@@ -568,6 +568,7 @@ Known gotchas:
 - **Chat Lambda cold starts:** the first turn after an idle period pays roughly 1–2 s of init. Do secret, database, and JWKS setup at module load, and have the app call `GET /warm` when the Chat tab gains focus or the mic is pressed. Add provisioned concurrency (1) only if that is not enough.
 - **Function URL is public:** reject requests without a valid JWT or Shortcut token before doing any work. Keep reserved concurrency low (5), since rejected calls are still billed invocations.
 - **Streaming and disconnects:** if the app disconnects mid-stream, the Chat Lambda keeps running. Finish and persist the turn, and let the app recover it by resending the same `client_message_id`. `sam local` cannot emulate response streaming, so test streaming locally through a small Node HTTP adapter.
+- **Model swaps:** route a task to a new model only after it passes that task's evals. Fall back to another model only before any text has streamed; afterwards, fail the turn and let the app resend. Small models suit narration (check-in, titles, summaries), not the tool-choosing chat agent.
 - Audio feedback: stop speech recognition before calling expo-speech, or the mic transcribes the app's own read-back.
 - Expo Go: expo-speech-recognition is a native module, so develop on an EAS development build from day one.
 - Speech permissions: iOS needs NSMicrophoneUsageDescription and NSSpeechRecognitionUsageDescription; Android needs RECORD\_AUDIO. Handle denial by hiding the mic button.
@@ -577,7 +578,7 @@ Known gotchas:
 
 Build in six phases; each ends with a usable assistant and a clear exit check.
 
-1. **Foundation.** SAM stack, RDS + schema, Cognito, a bare Expo app (EAS development build) with a chat screen, and the orchestrator loop with one tool (`log_entry`). The orchestrator runs in the Chat Lambda behind its Function URL (`RESPONSE_STREAM`), with in-code JWT verification, reserved concurrency, and SSE streaming to the app (section 3). Include a local Node HTTP adapter for streaming tests, since `sam local` cannot emulate streaming.
+1. **Foundation.** SAM stack, RDS + schema, Cognito, a bare Expo app (EAS development build) with a chat screen, and the orchestrator loop with one tool (`log_entry`). The loop calls models through `packages/models` (Anthropic adapter first) with per-task routing config, and a first eval suite covers `log_entry`. The orchestrator runs in the Chat Lambda behind its Function URL (`RESPONSE_STREAM`), with in-code JWT verification, reserved concurrency, and SSE streaming to the app (section 3). Include a local Node HTTP adapter for streaming tests, since `sam local` cannot emulate streaming.
    - Exit: log a session by chat, watch the reply stream into the app, and see the row in Postgres. A request without a valid JWT is rejected.
 2. **Logging and analytics (R5, R6).** `list_entries`, `get_stats`, `get_streaks`, plus quick-log buttons in the UI. Quick log is the first fast path, so this phase also stands up the REST API: API Gateway with the Cognito JWT authorizer, in front of the REST API Lambdas, sharing the service package with the Chat Lambda.
    - Exit: "How did my training look this month?" returns correct numbers.

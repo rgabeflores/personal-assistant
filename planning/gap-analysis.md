@@ -350,7 +350,35 @@ The updated mockups add multiple conversations: New chat (p.15), History (p.57),
   - **Shortcut:** `POST /shortcut/message` appends to the current conversation if it is within the resume window. Otherwise it starts a new `shortcut` conversation, titled like any chat.
   - **Weekly review:** creates a `review` conversation, which appears in History. "Training this week" on p.57 is one.
 
-## 13. Doc inconsistencies to fix in the source docs
+## 13. Model providers
+
+Details are in [model-providers.md](model-providers.md).
+
+### D-48 Models are called through one provider-neutral interface
+
+- **Gap:** ARCH §4 calls the Anthropic SDK directly from the agent loop, so changing or mixing models would mean rewriting the loop.
+- **Decision:** `packages/models` exposes `streamModel(task, request)` with adapters for Anthropic, OpenAI, and OpenAI-compatible servers (Ollama, llama.cpp, vLLM, hosted open models). The agent loop, check-in writer, weekly review, and title generator use only this interface. Claude remains the default for every task.
+- **Why it is safe:** correctness does not live in the model. INV-1 to INV-4 and INV-7 hold whichever model answers, so a weaker model degrades helpfulness, not data.
+
+### D-49 Stored history uses a canonical block format
+
+- **Gap:** ARCH §6 stores `messages.content` as Anthropic Messages API blocks, which would tie history to one provider.
+- **Decision:** store canonical `text`, `tool_call`, and `tool_result` blocks, close to Anthropic's shape; adapters translate on each call. Record the model and token usage on each assistant message (`messages.model`, `messages.usage`).
+
+### D-50 Models are routed per task in config
+
+- **Decision:** a routing file maps each task (`chat.agent`, `chat.title`, `chat.summary`, `checkin.write`, `review.write`, `logging.simple`) to a primary model and an optional fallback, with an SSM override per environment. Startup fails if a task is routed to a model that lacks a required capability (tools, streaming, JSON schema).
+- **Defaults:** `claude-sonnet-5-5` for `chat.agent`; `claude-haiku-4-5` for everything else (Q-16). Small or local models are tried first on narration tasks (Q-21).
+
+### D-51 Fallback happens only before the first streamed token
+
+- **Decision:** a timeout, 5xx, 429, or connection error before any text has streamed retries once, then moves to the task's fallback. After text has streamed, the turn fails with the normal `error` event and can be resent. Two schema-invalid tool calls in a row also escalate to the fallback. Confirm, cancel, undo, and renew involve no model (D-13), so they keep working during a provider outage.
+
+### D-52 Evals gate every routing change
+
+- **Decision:** Phase 1 adds a replay eval suite (about 50 cases with expected tool calls and arguments, fixed `now`, real tools against a test database). A model is routed to a task only after passing that task's evals, and routing changes merge with the results attached.
+
+## 14. Doc inconsistencies to fix in the source docs
 
 | # | Where | Issue | Fix |
 | --- | --- | --- | --- |
@@ -367,3 +395,4 @@ The updated mockups add multiple conversations: New chat (p.15), History (p.57),
 | 11 | BRIEF S3, S5 | S3 still describes the "Read-back on" speaker header, which the updated mockups removed. S5 doesn't mention bar total labels, the "18 of 21 done" count, or the training-only breakdown. | Update the brief to match p.2, p.4, and p.15 |
 | 12 | BRIEF §5 S2 vs D-5 | The brief treats habits as a category. The mockups show a study activity (Language practice) that is also a habit. | Describe habits as a flag on any activity |
 | 13 | ARCH §6 | `messages` holds history with no retention policy; ARCH §11 sends only the last 20 turns plus a summary to the model | History is kept for browsing and search (D-42); the context window stays per conversation |
+| 14 | ARCH §4, §6 | §4 step 5 runs tools "through the MCP server" although §3 and D-2 run them in-process; §6 stores provider-specific content blocks | **Done (Oct 13):** §4 now runs tools through the shared tool layer and calls models through the model interface (D-48); §6 stores canonical blocks (D-49) |

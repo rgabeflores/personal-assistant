@@ -623,7 +623,7 @@ paths:
       tags: [Chat]
       operationId: listMessages
       summary: Messages, newest first (scroll back with `cursor`)
-      description: Returns the client projection only; tool_use and tool_result blocks are never exposed.
+      description: Returns the client projection only; tool_call and tool_result blocks are never exposed.
       parameters:
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Limit'

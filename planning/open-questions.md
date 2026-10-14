@@ -1,6 +1,6 @@
 # Open Questions
 
-Oct 9, 2026 · @Gabe
+Oct 9, 2026 · updated Oct 13 · @Gabe
 
 Questions that need an owner's decision. Each has a **recommended default**; the API spec and data model deltas already assume it, so work can start now and change later if the answer differs. "Blocks" says what is affected if the answer differs from the default. Answered questions move to [Resolved](#resolved) with the decision they became.
 
@@ -102,13 +102,33 @@ BRIEF §7 says "write actions queue and show a clock icon until synced".
 
 ### Q-16 Model selection · Proposed
 
-- **Default:** `claude-sonnet-5-5` for chat; `claude-haiku-4-5` for check-ins, the weekly review, conversation titles, and simple logging (ARCH §9). Keep both as config, not code.
+- **Default:** `claude-sonnet-5-5` for `chat.agent`; `claude-haiku-4-5` for `chat.title`, `chat.summary`, `checkin.write`, `review.write`, and `logging.simple` (ARCH §9, D-50). These live in the routing config, not code, and can change per task after passing evals (D-52).
 
 ### Q-20 Chat Lambda cold starts · Proposed
 
 - **Default:** no provisioned concurrency. The app sends `GET /warm` when the Chat tab gains focus, the mic is pressed, or the composer is focused, throttled to once every 2 minutes. Measure first-token latency in the first weeks of use.
 - **Upgrade:** if cold turns still feel slow on push-to-talk, set provisioned concurrency to 1 (about $9 a month, 1 GB ARM).
 - **Also open:** add CloudFront for a stable custom domain? It is needed only if the Function URL ever has to change, which would break the configured Siri Shortcut.
+
+### Q-21 Where should a small or local model run? · Open
+
+Small models suit narration tasks (check-in writer, titles, summaries, weekly review), not the chat agent ([model-providers.md §8](model-providers.md#8-which-tasks-suit-a-small-model)).
+
+- **Default:** no local model in V1 production. Build the interface (D-48) in Phase 1. After Phase 4, try an open model on `checkin.write` and `chat.title` through **Bedrock**, which needs no hardware or tunnel, and keep Haiku as the fallback.
+- **Alternative A, home machine:** Ollama or llama.cpp on your own computer, reached through Cloudflare Tunnel with an access token. Data stays on your hardware, but every task routed there needs a fallback for when the machine is asleep.
+- **Alternative B, on the phone:** Apple's on-device model or Gemini Nano, for offline read-back and offline quick-log parsing. This is a separate client feature after Phase 6, not a server provider.
+- **Blocks:** nothing in Phases 1–3.
+
+### Q-22 Thin in-house model interface or the Vercel AI SDK? · Proposed
+
+- **Default:** a thin in-house interface with three adapters (Anthropic, OpenAI, OpenAI-compatible). It keeps prompt caching, streaming events, and errors under our control and the Lambda bundle small.
+- **Alternative:** the Vercel AI SDK, which already normalizes many providers. Worth switching to if we end up with more than three or four adapters.
+- **Blocks:** Phase 1 scaffolding of `packages/models`.
+
+### Q-23 Configure a second cloud provider as a fallback? · Open
+
+- **Default:** no. Anthropic models fall back to each other (Haiku → Sonnet for `logging.simple`). An OpenAI key adds another account and another place personal data goes (model-providers.md §10).
+- **Alternative:** add an OpenAI model as the `chat.agent` fallback once it passes the chat evals, so an Anthropic outage does not take chat down.
 
 ## Data and lifecycle
 

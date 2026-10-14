@@ -10,6 +10,7 @@ Pre-build planning that ties the product docs to an implementable backend contra
 | [open-questions.md](open-questions.md) | Questions that still need an owner's call (`Q-n` IDs), each with a recommended default so work is not blocked |
 | [data-model-changes.md](data-model-changes.md) | Schema deltas against the architecture doc section 6, needed to serve the mockups |
 | [chat-service.md](chat-service.md) | Deployment of the streaming chat endpoints on a Lambda Function URL with response streaming |
+| [model-providers.md](model-providers.md) | Provider-neutral model interface, per-task routing, fallbacks, local model options, and evals |
 | [api/README.md](api/README.md) | Mobile API conventions, auth, chat streaming protocol, and a screen-by-screen data coverage matrix |
 | [api/openapi.yaml](api/openapi.yaml) | OpenAPI 3.1 spec for the backend the mobile app integrates with |
 

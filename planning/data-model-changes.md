@@ -81,7 +81,10 @@ ALTER TABLE messages
   ADD COLUMN spoken_text       text,
   ADD COLUMN suggestions       text[] NOT NULL DEFAULT '{}',
   ADD COLUMN status            text NOT NULL DEFAULT 'complete'
-                               CHECK (status IN ('complete','failed'));
+                               CHECK (status IN ('complete','failed')),
+  ADD COLUMN model             text,                   -- 'anthropic/claude-sonnet-5-5'; assistant messages only (D-49)
+  ADD COLUMN usage             jsonb;                  -- {"input_tokens":…,"output_tokens":…,"cached_tokens":…}
+-- messages.content holds canonical blocks (text, tool_call, tool_result), not one provider's format (D-49).
 CREATE UNIQUE INDEX ON messages (user_id, client_message_id) WHERE client_message_id IS NOT NULL;
 
 CREATE TABLE action_cards (

@@ -24,7 +24,7 @@ Mobile app ──HTTPS──► API Gateway HTTP API ──► Lambda handlers  
                           └─► "chat" Lambda (Node.js, ARM64, in VPC private app subnets)
                                  ├─► RDS Proxy ─► Postgres
                                  ├─► Tool layer (in-process package, same code as the MCP server)
-                                 ├─► Anthropic, Google, embeddings (via NAT)
+                                 ├─► Model providers, Google, embeddings (via NAT; see model-providers.md)
                                  └─► Secrets Manager (VPC endpoint)
 iOS Shortcut ──HTTPS──► Function URL ─► chat Lambda   (POST /v1/shortcut/message)
 ```
