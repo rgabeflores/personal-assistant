@@ -79,17 +79,11 @@
         <mxCell id="cfn" parent="region" style="sketch=0;outlineConnect=0;fontColor=#232F3E;fillColor=#E7157B;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.cloudformation;" value="CloudFormation&lt;br&gt;SAM stacks" vertex="1">
           <mxGeometry height="60" width="60" x="900" y="50" as="geometry" />
         </mxCell>
-        <mxCell id="vpc" parent="region" style="outlineConnect=0;gradientColor=none;html=1;whiteSpace=wrap;fontSize=12;fontStyle=0;container=1;pointerEvents=0;collapsible=0;recursiveResize=0;shape=mxgraph.aws4.group;grIcon=mxgraph.aws4.group_vpc2;strokeColor=#8C4FFF;fillColor=none;verticalAlign=top;align=left;spacingLeft=30;fontColor=#8C4FFF;dashed=0;" value="VPC" vertex="1">
-          <mxGeometry height="570" width="980" x="20" y="330" as="geometry" />
+        <mxCell id="vpc" parent="region" style="outlineConnect=0;gradientColor=none;html=1;whiteSpace=wrap;fontSize=12;fontStyle=0;container=1;pointerEvents=0;collapsible=0;recursiveResize=0;shape=mxgraph.aws4.group;grIcon=mxgraph.aws4.group_vpc2;strokeColor=#8C4FFF;fillColor=none;verticalAlign=top;align=left;spacingLeft=30;fontColor=#8C4FFF;dashed=0;" value="VPC (RDS only)" vertex="1">
+          <mxGeometry height="270" width="980" x="20" y="630" as="geometry" />
         </mxCell>
-        <mxCell id="pub" parent="vpc" style="outlineConnect=0;gradientColor=none;html=1;whiteSpace=wrap;fontSize=12;fontStyle=0;container=1;pointerEvents=0;collapsible=0;recursiveResize=0;shape=mxgraph.aws4.group;grIcon=mxgraph.aws4.group_security_group;grStroke=0;strokeColor=#7AA116;fillColor=#F2F6E8;verticalAlign=top;align=left;spacingLeft=30;fontColor=#248814;dashed=0;" value="Public subnet" vertex="1">
-          <mxGeometry height="230" width="200" x="20" y="40" as="geometry" />
-        </mxCell>
-        <mxCell id="nat" parent="pub" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=none;fillColor=#8C4FFF;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.nat_gateway;" value="NAT gateway&lt;br&gt;egress to Claude, Google,&lt;br&gt;Expo, Twilio, embeddings" vertex="1">
-          <mxGeometry height="60" width="60" x="70" y="60" as="geometry" />
-        </mxCell>
-        <mxCell id="appnet" parent="vpc" style="outlineConnect=0;gradientColor=none;html=1;whiteSpace=wrap;fontSize=12;fontStyle=0;container=1;pointerEvents=0;collapsible=0;recursiveResize=0;shape=mxgraph.aws4.group;grIcon=mxgraph.aws4.group_security_group;grStroke=0;strokeColor=#00A4A6;fillColor=#E6F6F7;verticalAlign=top;align=left;spacingLeft=30;fontColor=#147EBA;dashed=0;" value="Private subnets - app (2 AZs)" vertex="1">
-          <mxGeometry height="230" width="620" x="260" y="40" as="geometry" />
+        <mxCell id="appnet" parent="region" style="outlineConnect=0;gradientColor=none;html=1;whiteSpace=wrap;fontSize=12;fontStyle=0;container=1;pointerEvents=0;collapsible=0;recursiveResize=0;shape=mxgraph.aws4.group;grIcon=mxgraph.aws4.group_security_group;grStroke=0;strokeColor=#00A4A6;fillColor=#E6F6F7;verticalAlign=top;align=left;spacingLeft=30;fontColor=#147EBA;dashed=0;" value="Lambdas (no VPC; direct internet egress)" vertex="1">
+          <mxGeometry height="230" width="620" x="280.0" y="370.0" as="geometry" />
         </mxCell>
         <mxCell id="orch" parent="appnet" style="sketch=0;outlineConnect=0;fontColor=#232F3E;fillColor=#ED7100;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.lambda;" value="&lt;b&gt;Chat Lambda&lt;/b&gt;&lt;br&gt;agent loop,&lt;br&gt;SSE streaming" vertex="1">
           <mxGeometry height="60" width="60" x="30" y="70" as="geometry" />
@@ -113,36 +107,11 @@
             <Array as="points" />
           </mxGeometry>
         </mxCell>
-        <mxCell id="vpce" parent="vpc" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=none;fillColor=#8C4FFF;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.endpoints;" value="Interface endpoints&lt;br&gt;Secrets Manager,&lt;br&gt;Scheduler" vertex="1">
-          <mxGeometry height="60" width="60" x="905" y="100" as="geometry" />
+        <mxCell id="datanet" parent="vpc" style="outlineConnect=0;gradientColor=none;html=1;whiteSpace=wrap;fontSize=12;fontStyle=0;container=1;pointerEvents=0;collapsible=0;recursiveResize=0;shape=mxgraph.aws4.group;grIcon=mxgraph.aws4.group_security_group;grStroke=0;strokeColor=#00A4A6;fillColor=#E6F6F7;verticalAlign=top;align=left;spacingLeft=30;fontColor=#147EBA;dashed=0;" value="Public subnets (2 AZs, DB subnet group)" vertex="1">
+          <mxGeometry height="200" width="500" x="240" y="40" as="geometry" />
         </mxCell>
-        <mxCell id="datanet" parent="vpc" style="outlineConnect=0;gradientColor=none;html=1;whiteSpace=wrap;fontSize=12;fontStyle=0;container=1;pointerEvents=0;collapsible=0;recursiveResize=0;shape=mxgraph.aws4.group;grIcon=mxgraph.aws4.group_security_group;grStroke=0;strokeColor=#00A4A6;fillColor=#E6F6F7;verticalAlign=top;align=left;spacingLeft=30;fontColor=#147EBA;dashed=0;" value="Private subnets - data (2 AZs, DB subnet group)" vertex="1">
-          <mxGeometry height="230" width="500" x="260" y="310" as="geometry" />
-        </mxCell>
-        <mxCell id="proxy" parent="datanet" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=none;fillColor=#C925D1;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.rds_proxy;" value="RDS Proxy" vertex="1">
-          <mxGeometry height="60" width="60" x="120" y="80" as="geometry" />
-        </mxCell>
-        <mxCell id="rds" parent="datanet" style="sketch=0;outlineConnect=0;fontColor=#232F3E;fillColor=#C925D1;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.rds;" value="RDS PostgreSQL 16&lt;br&gt;+ pgvector, Single-AZ,&lt;br&gt;automated backups" vertex="1">
-          <mxGeometry height="60" width="60" x="320" y="80" as="geometry" />
-        </mxCell>
-        <mxCell id="e7" edge="1" parent="datanet" source="proxy" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;libavoidRouting=1;orthogonalLoop=1;jettySize=auto;" target="rds" value="">
-          <mxGeometry relative="1" as="geometry">
-            <Array as="points" />
-          </mxGeometry>
-        </mxCell>
-        <mxCell id="e6" edge="1" parent="vpc" source="mcp" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;libavoidRouting=1;orthogonalLoop=1;jettySize=auto;" target="proxy" value="">
-          <mxGeometry relative="1" as="geometry">
-            <Array as="points">
-              <mxPoint x="560" y="280" /><mxPoint x="430" y="280" /></Array>
-          </mxGeometry>
-        </mxCell>
-        <mxCell id="e16" edge="1" parent="vpc" source="orch" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;dashed=1;libavoidRouting=1;orthogonalLoop=1;jettySize=auto;" target="nat" value="egress">
-          <mxGeometry relative="1" as="geometry">
-            <Array as="points">
-              <mxPoint x="220" y="140" />
-              <mxPoint x="220" y="130" />
-            </Array>
-          </mxGeometry>
+        <mxCell id="rds" parent="datanet" style="sketch=0;outlineConnect=0;fontColor=#232F3E;fillColor=#C925D1;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.rds;" value="RDS PostgreSQL 16&lt;br&gt;+ pgvector, public endpoint,&lt;br&gt;forced TLS, IAM database auth" vertex="1">
+          <mxGeometry height="60" width="60" x="220" y="60" as="geometry" />
         </mxCell>
         <mxCell id="e4" edge="1" parent="region" source="apigw" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;libavoidRouting=1;orthogonalLoop=1;jettySize=auto;" target="api" value="">
           <mxGeometry relative="1" as="geometry">
@@ -179,11 +148,9 @@
               <mxPoint x="820" y="274" /><mxPoint x="540" y="274" /></Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="e15" edge="1" parent="region" source="vpce" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;dashed=1;libavoidRouting=1;orthogonalLoop=1;jettySize=auto;" target="secrets" value="secrets">
+        <mxCell id="e15" edge="1" parent="region" source="appnet" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;dashed=1;libavoidRouting=1;orthogonalLoop=1;jettySize=auto;" target="secrets" value="keys">
           <mxGeometry relative="1" as="geometry">
-            <Array as="points">
-              <mxPoint x="955" y="262" /><mxPoint x="660" y="262" /></Array>
-          </mxGeometry>
+            </mxGeometry>
         </mxCell>
         <mxCell id="ext" parent="1" style="swimlane;startSize=24;fillColor=#f5f5f5;strokeColor=#999999;html=1;fontStyle=1;" value="External services" vertex="1">
           <mxGeometry height="560" width="210" x="1380" y="140" as="geometry" />
@@ -226,11 +193,9 @@
               <mxPoint x="300" y="250" /><mxPoint x="300" y="255" /></Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="e17" edge="1" parent="1" source="orch" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;libavoidRouting=1;orthogonalLoop=1;jettySize=auto;" target="claude" value="via NAT">
+        <mxCell id="e17" edge="1" parent="1" source="appnet" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;orthogonalLoop=1;jettySize=auto;exitX=1;exitY=0.35;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="claude" value="HTTPS (model APIs)">
           <mxGeometry relative="1" as="geometry">
-            <Array as="points">
-              <mxPoint x="580" y="560" /><mxPoint x="580" y="213" /></Array>
-          </mxGeometry>
+            <Array as="points"><mxPoint x="1350" y="510" /><mxPoint x="1350" y="212" /></Array></mxGeometry>
         </mxCell>
         <mxCell id="e18" edge="1" parent="1" source="mcp" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;libavoidRouting=1;orthogonalLoop=1;jettySize=auto;" target="gcal" value="">
           <mxGeometry relative="1" as="geometry">
@@ -276,10 +241,10 @@
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="legend" parent="1" style="text;html=1;align=left;verticalAlign=top;whiteSpace=wrap;fontSize=11;" value="&lt;b&gt;Notes&lt;/b&gt;&lt;br&gt;Solid = request or data flow; dashed = auth, egress, failure, or delivery path.&lt;br&gt;REST routes go through API Gateway; chat turns and the Shortcut go through the chat Lambda's Function URL (streaming, no 30 s limit).&lt;br&gt;Chat and REST Lambdas run tools in-process from shared packages; the MCP server is for external clients.&lt;br&gt;All Lambdas log to CloudWatch; alarms on notifier failures and DLQ depth.&lt;br&gt;Calls to external services leave through the NAT gateway." vertex="1">
+        <mxCell id="legend" parent="1" style="text;html=1;align=left;verticalAlign=top;whiteSpace=wrap;fontSize=11;" value="&lt;b&gt;Notes&lt;/b&gt;&lt;br&gt;Solid = request or data flow; dashed = auth, egress, failure, or delivery path.&lt;br&gt;REST routes go through API Gateway; chat turns and the Shortcut go through the chat Lambda's Function URL (streaming, no 30 s limit).&lt;br&gt;Chat and REST Lambdas run tools in-process from shared packages; the MCP server is for external clients.&lt;br&gt;All Lambdas log to CloudWatch; alarms on notifier failures and DLQ depth.&lt;br&gt;Lambdas run outside the VPC and call external services directly. RDS is public with forced TLS and IAM database auth; no NAT gateway or RDS Proxy." vertex="1">
           <mxGeometry height="170" width="260" x="1380" y="720" as="geometry" />
         </mxCell>
-      <mxCell id="api" parent="appnet" style="sketch=0;outlineConnect=0;fontColor=#232F3E;fillColor=#ED7100;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.lambda;" value="&lt;b&gt;REST API&lt;/b&gt;&lt;br&gt;Lambdas" vertex="1"><mxGeometry x="150" y="70" width="60" height="60" as="geometry" /></mxCell><mxCell id="furl" parent="region" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=none;fillColor=#ED7100;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.lambda_function;" value="&lt;b&gt;Lambda Function URL&lt;/b&gt;&lt;br&gt;RESPONSE_STREAM,&lt;br&gt;JWT checked in code" vertex="1"><mxGeometry x="150" y="160" width="60" height="60" as="geometry" /></mxCell><mxCell id="e30" parent="region" source="furl" target="orch" edge="1" value="stream" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;libavoidRouting=1;orthogonalLoop=1;jettySize=auto;"><mxGeometry relative="1" as="geometry"><Array as="points" /></mxGeometry></mxCell><mxCell id="e31" parent="vpc" source="orch" target="proxy" edge="1" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;libavoidRouting=1;orthogonalLoop=1;jettySize=auto;"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="290" y="280" /><mxPoint x="390" y="280" /></Array></mxGeometry></mxCell><mxCell id="e32" parent="vpc" source="api" target="proxy" edge="1" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;libavoidRouting=1;orthogonalLoop=1;jettySize=auto;"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="440" y="290" /><mxPoint x="410" y="290" /></Array></mxGeometry></mxCell><mxCell id="e33" parent="1" source="app" target="furl" edge="1" value="chat: HTTPS SSE + JWT" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;libavoidRouting=1;orthogonalLoop=1;jettySize=auto;"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="240" y="140" /><mxPoint x="240" y="240" /></Array></mxGeometry></mxCell></root>
+      <mxCell id="api" parent="appnet" style="sketch=0;outlineConnect=0;fontColor=#232F3E;fillColor=#ED7100;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.lambda;" value="&lt;b&gt;REST API&lt;/b&gt;&lt;br&gt;Lambdas" vertex="1"><mxGeometry x="150" y="70" width="60" height="60" as="geometry" /></mxCell><mxCell id="furl" parent="region" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=none;fillColor=#ED7100;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.lambda_function;" value="&lt;b&gt;Lambda Function URL&lt;/b&gt;&lt;br&gt;RESPONSE_STREAM,&lt;br&gt;JWT checked in code" vertex="1"><mxGeometry x="150" y="160" width="60" height="60" as="geometry" /></mxCell><mxCell id="e30" parent="region" source="furl" target="orch" edge="1" value="stream" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;libavoidRouting=1;orthogonalLoop=1;jettySize=auto;"><mxGeometry relative="1" as="geometry"><Array as="points" /></mxGeometry></mxCell><mxCell id="e31" parent="1" source="appnet" target="rds" edge="1" value="all Lambdas: TLS + IAM auth" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;orthogonalLoop=1;jettySize=auto;exitX=0.371;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;"><mxGeometry relative="1" as="geometry" /></mxCell><mxCell id="e33" parent="1" source="app" target="furl" edge="1" value="chat: HTTPS SSE + JWT" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;libavoidRouting=1;orthogonalLoop=1;jettySize=auto;"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="240" y="140" /><mxPoint x="240" y="240" /></Array></mxGeometry></mxCell></root>
     </mxGraphModel>
   </diagram>
 </mxfile>

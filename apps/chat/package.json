@@ -1,0 +1,22 @@
+{
+  "name": "@pa/chat",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "tsx watch --env-file-if-exists=../../.env src/dev-server.ts",
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.1151.0",
+    "@pa/agent": "workspace:*",
+    "@pa/db": "workspace:*",
+    "@pa/models": "workspace:*",
+    "@pa/services": "workspace:*",
+    "aws-jwt-verify": "^5.2.1"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.164",
+    "@types/pg": "^8.23.1"
+  }
+}

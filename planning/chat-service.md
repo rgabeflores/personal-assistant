@@ -21,17 +21,18 @@ A chat turn is billed only for its wall time. At about 15 s per turn, 1 GB on AR
 Mobile app ──HTTPS──► API Gateway HTTP API ──► Lambda handlers         (REST: /today, /lists, …)
      │
      └──HTTPS (SSE)──► Lambda Function URL (AuthType NONE, InvokeMode RESPONSE_STREAM)
-                          └─► "chat" Lambda (Node.js, ARM64, in VPC private app subnets)
-                                 ├─► RDS Proxy ─► Postgres
+                          └─► "chat" Lambda (Node.js, ARM64, no VPC)
+                                 ├─► Postgres (public endpoint, TLS + IAM auth)
                                  ├─► Tool layer (in-process package, same code as the MCP server)
-                                 ├─► Model providers, Google, embeddings (via NAT; see model-providers.md)
-                                 └─► Secrets Manager (VPC endpoint)
+                                 ├─► Model providers, Google, embeddings (direct; see model-providers.md)
+                                 └─► Secrets Manager
 iOS Shortcut ──HTTPS──► Function URL ─► chat Lambda   (POST /v1/shortcut/message)
 ```
 
 - **One function** (`apps/chat`) routes the three paths it serves: `POST /v1/conversations/{id}/messages`, `POST /v1/shortcut/message`, and `GET /v1/warm`. It imports `packages/agent` (the agent loop) and `packages/services` (domain logic shared with the REST Lambdas and the MCP server, D-2).
 - **Tools run in-process.** The function calls the tool functions directly, not the MCP server over HTTP, which saves a network hop per tool call. The MCP server remains for external clients (the Claude app, Claude Code).
 - **Check-in and review jobs** are separate Lambdas that import the same `packages/agent`.
+- **Phase 1 bootstrap:** until Phase 2 adds the REST API, the Chat Lambda also serves `POST /v1/conversations`, so the app can start a chat. The route moves to API Gateway in Phase 2, and the app switches to the REST base URL.
 - **Defined in the existing SAM stack** as `AWS::Serverless::Function` with `FunctionUrlConfig: { AuthType: NONE, InvokeMode: RESPONSE_STREAM }`. No new services to operate.
 
 ## 3. Function configuration
@@ -43,14 +44,15 @@ iOS Shortcut ──HTTPS──► Function URL ─► chat Lambda   (POST /v1/sh
 | Timeout | 300 s | Well above the longest expected turn (8 tool iterations, ARCH §4) |
 | Reserved concurrency | 5 | Caps cost and blast radius, since the URL is public; a single user rarely needs more than 1–2 |
 | Provisioned concurrency | 0 (default) | Set to 1 only if cold starts remain noticeable (Q-20) |
-| VPC | Private app subnets, same security group as the REST Lambdas | Reaches RDS Proxy |
+| VPC | None | Reaches the internet directly; Postgres over TLS with IAM database auth (ARCH §10, Q-24) |
+| Database connections | `pg` pool of 2 per container | Reserved concurrency 5 caps it at 10, so no RDS Proxy |
 | Logs | CloudWatch, same rules as ARCH §10 | No message bodies at INFO |
 
 ## 4. Cold starts and warm-up
 
 A cold start (runtime init, secret fetch, database connection) adds roughly 1–2 s to the first turn after the function has sat idle. Mitigations, in order:
 
-1. **Do expensive init outside the handler.** Fetch secrets, create the RDS Proxy connection, create the Anthropic client, and load the JWKS at module load, so a warm invocation reuses them.
+1. **Do expensive init outside the handler.** Fetch secrets, open the database connection, create the Anthropic client, and load the JWKS at module load, so a warm invocation reuses them.
 2. **The app warms the function before it is needed.** It sends `GET /v1/warm` when the Chat tab gains focus, when the mic is pressed, and when the composer gets focus, at most once every 2 minutes. The endpoint is unauthenticated, does no work beyond the module-level init, and returns `204`. By the time the user finishes speaking or typing, the function is usually warm.
 3. **If that is not enough,** set provisioned concurrency to 1 (about $9 a month).
 

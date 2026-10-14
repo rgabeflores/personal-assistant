@@ -272,7 +272,7 @@ Each item below is something the mockups or the UI brief need that the architect
   - **Polling:** loses streaming.
 - **Decision:** serve the turn-running endpoints from a dedicated **chat Lambda** with a **Function URL** in `RESPONSE_STREAM` mode. Details are in [chat-service.md](chat-service.md). Why:
   - **Cost:** pay-per-use comes to about $0–1 a month for one user, with no fixed cost.
-  - **Fits the existing stack:** it runs in the same SAM stack, VPC, and RDS Proxy setup as the REST Lambdas, with no new service to operate.
+  - **Fits the existing stack:** it runs in the same SAM stack and database setup as the REST Lambdas, with no new service to operate.
   - **Long enough:** turns can run up to 15 minutes with native SSE streaming on Node.js.
 - **Scope:** only `POST /conversations/{id}/messages`, `POST /shortcut/message`, and `GET /warm`. Everything else stays on API Gateway. The check-in writer and the weekly review are separate Lambdas that share the agent-loop package (`packages/agent`).
 - **Trade-offs accepted:**
@@ -367,8 +367,13 @@ Details are in [model-providers.md](model-providers.md).
 
 ### D-50 Models are routed per task in config
 
-- **Decision:** a routing file maps each task (`chat.agent`, `chat.title`, `chat.summary`, `checkin.write`, `review.write`, `logging.simple`) to a primary model and an optional fallback, with an SSM override per environment. Startup fails if a task is routed to a model that lacks a required capability (tools, streaming, JSON schema).
+- **Decision:** a routing file maps each task (`chat.agent`, `chat.title`, `chat.summary`, `checkin.write`, `review.write`, `logging.simple`) to a primary model and an optional fallback, overridable per environment through `MODEL_CONFIG` (D-53). Startup fails if a task is routed to a model that lacks a required capability (tools, streaming, JSON schema).
 - **Defaults:** `claude-sonnet-5-5` for `chat.agent`; `claude-haiku-4-5` for everything else (Q-16). Small or local models are tried first on narration tasks (Q-21).
+
+### D-53 Providers and the model catalog are config, not code
+
+- **Gap:** the first scaffold hard-coded one adapter and a two-model catalog, so using another provider needed a code change.
+- **Decision:** `MODEL_CONFIG` (JSON, merged over built-in defaults) declares `providers` (`anthropic`, `openai`, `openai_compatible` with `base_url`, optional `auth: "none"`), a `models` capability catalog, and `routes`. One fetch-based adapter serves OpenAI and every OpenAI-compatible server. Keys come from `<PROVIDER>_API_KEY` locally or the secret `pa/<stage>/llm/<provider>` in AWS. Startup validates every route against the providers and the catalog. An in-app picker on top of this is proposed in [model-providers.md §11](model-providers.md#11-in-app-model-picker-proposed-q-25) (Q-25).
 
 ### D-51 Fallback happens only before the first streamed token
 

@@ -45,6 +45,10 @@ ALTER TABLE users
   ADD COLUMN custom_vocabulary   text[] NOT NULL DEFAULT '{}',
   ADD COLUMN phone_verified_at   timestamptz,
   ADD COLUMN checkin_schedule    text;                 -- 'checkin-<user_id>' (D-19)
+
+-- Proposed with the in-app model picker (Q-25, model-providers.md §11); not in the Phase 1 migration.
+ALTER TABLE users
+  ADD COLUMN model_settings      jsonb  NOT NULL DEFAULT '{}';  -- {"chat": "openai/<model>", "background": null}
 ```
 
 ## 3. Conversations, history, and action cards (D-12, D-13, D-16, D-40 – D-46)

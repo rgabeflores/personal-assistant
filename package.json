@@ -1,0 +1,26 @@
+{
+  "name": "personal-assistant",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.18.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "pnpm -r --if-present build",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "vitest run",
+    "dev": "pnpm db:up && pnpm db:migrate && pnpm dev:chat",
+    "db:up": "docker compose up -d --wait db",
+    "db:migrate": "pnpm --filter @pa/db migrate",
+    "dev:chat": "pnpm --filter @pa/chat dev",
+    "eval": "pnpm --filter @pa/evals eval"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.4"
+  }
+}

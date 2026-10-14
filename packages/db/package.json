@@ -1,0 +1,22 @@
+{
+  "name": "@pa/db",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "migrate": "node scripts/migrate.mjs",
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "node-pg-migrate": "^9.0.0",
+    "pg": "^8.23.1",
+    "@aws-sdk/client-secrets-manager": "^3.1151.0",
+    "@aws-sdk/rds-signer": "^3.1151.0"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.23.1"
+  }
+}

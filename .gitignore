@@ -1,1 +1,14 @@
 **/*.DS_Store
+node_modules/
+dist/
+.aws-sam/
+coverage/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+
+# Expo
+.expo/
+apps/mobile/ios/
+apps/mobile/android/

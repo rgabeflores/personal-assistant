@@ -1,0 +1,15 @@
+{
+  "name": "@pa/evals",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "eval": "tsx --env-file-if-exists=../.env src/run.ts",
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@pa/agent": "workspace:*",
+    "@pa/db": "workspace:*",
+    "@pa/models": "workspace:*",
+    "@pa/services": "workspace:*"
+  }
+}

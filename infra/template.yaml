@@ -1,0 +1,223 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Personal assistant, Phase 1 (ARCH §12) - database, auth, and the Chat Lambda.
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, prod]
+  CognitoDomainPrefix:
+    Type: String
+    Description: Globally unique prefix for the Cognito hosted UI domain.
+  AppRedirectUri:
+    Type: String
+    Default: assistant://auth
+    Description: Redirect URI registered for the app's PKCE sign-in.
+  DbInstanceClass:
+    Type: String
+    Default: db.t4g.micro
+  ModelConfig:
+    Type: String
+    Default: "{}"
+    Description: >-
+      JSON merged over the built-in model config (providers, models, routes; planning/model-providers.md §5).
+      Each keyed provider reads its key from the secret pa/<Stage>/llm/<provider>.
+
+Conditions:
+  IsProd: !Equals [!Ref Stage, prod]
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Architectures: [arm64]
+    Handler: index.handler
+    # Lambdas run outside any VPC so they reach the internet without a NAT gateway (Q-24).
+    Environment:
+      Variables:
+        NODE_OPTIONS: --enable-source-maps
+        DB_HOST: !GetAtt Database.Endpoint.Address
+        DB_NAME: assistant
+
+Resources:
+  # ── Network: a public subnet pair for RDS only. No NAT, no private subnets (Q-24). ──
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.20.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags: [{ Key: Name, Value: !Sub "pa-${Stage}" }]
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties: { VpcId: !Ref Vpc, InternetGatewayId: !Ref InternetGateway }
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties: { VpcId: !Ref Vpc, CidrBlock: 10.20.0.0/24, AvailabilityZone: !Select [0, !GetAZs ""] }
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties: { VpcId: !Ref Vpc, CidrBlock: 10.20.1.0/24, AvailabilityZone: !Select [1, !GetAZs ""] }
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties: { VpcId: !Ref Vpc }
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties: { RouteTableId: !Ref PublicRouteTable, DestinationCidrBlock: 0.0.0.0/0, GatewayId: !Ref InternetGateway }
+  PublicSubnetARoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PublicSubnetA, RouteTableId: !Ref PublicRouteTable }
+  PublicSubnetBRoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PublicSubnetB, RouteTableId: !Ref PublicRouteTable }
+
+  DbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      # Lambda has no fixed egress IPs, so Postgres is open on 5432. TLS is forced and the app
+      # signs in with short-lived IAM tokens; the only password is the RDS-managed master secret.
+      GroupDescription: Postgres over TLS
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 5432, ToPort: 5432, CidrIp: 0.0.0.0/0 }
+
+  # ── Postgres 16 + pgvector (ARCH §6) ──
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Public subnets
+      SubnetIds: [!Ref PublicSubnetA, !Ref PublicSubnetB]
+  DbParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: Force TLS
+      Family: postgres16
+      Parameters:
+        rds.force_ssl: "1"
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      Engine: postgres
+      EngineVersion: "16"
+      DBInstanceClass: !Ref DbInstanceClass
+      AllocatedStorage: "20"
+      StorageType: gp3
+      StorageEncrypted: true
+      DBName: assistant
+      MasterUsername: assistant
+      ManageMasterUserPassword: true # password lives in Secrets Manager; used only by migrations
+      EnableIAMDatabaseAuthentication: true
+      DBParameterGroupName: !Ref DbParameterGroup
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups: [!Ref DbSecurityGroup]
+      PubliclyAccessible: true
+      BackupRetentionPeriod: 7
+      DeletionProtection: !If [IsProd, true, false]
+
+  # ── Auth: Cognito, admin-created users only (D-31) ──
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "pa-${Stage}"
+      AdminCreateUserConfig: { AllowAdminCreateUserOnly: true }
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: mobile
+      GenerateSecret: false
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows: [code]
+      AllowedOAuthScopes: [openid, email, profile]
+      CallbackURLs: [!Ref AppRedirectUri]
+      LogoutURLs: [!Ref AppRedirectUri]
+      SupportedIdentityProviders: [COGNITO]
+      ExplicitAuthFlows: [ALLOW_REFRESH_TOKEN_AUTH]
+      PreventUserExistenceErrors: ENABLED
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      UserPoolId: !Ref UserPool
+      Domain: !Ref CognitoDomainPrefix
+
+  # ── Model provider keys (model-providers.md §5): one secret per provider, named pa/<stage>/llm/<provider>.
+  # Anthropic is created here; add others with `aws secretsmanager create-secret`. Set values after deploy. ──
+  AnthropicApiKey:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "pa/${Stage}/llm/anthropic"
+      Description: Anthropic API key (plain string)
+
+  # ── Chat Lambda behind a streaming Function URL (chat-service.md) ──
+  ChatFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "pa-${Stage}-chat"
+      CodeUri: ../apps/chat/dist
+      MemorySize: 1024
+      Timeout: 300
+      ReservedConcurrentExecutions: 5 # caps cost and abuse; the URL is public
+      Environment:
+        Variables:
+          DB_USER: app
+          MODEL_CONFIG: !Ref ModelConfig
+          MODEL_SECRET_PREFIX: !Sub "pa/${Stage}/llm/"
+          USER_POOL_ID: !Ref UserPool
+          USER_POOL_CLIENT_ID: !Ref UserPoolClient
+      Policies:
+        - Statement:
+            - Effect: Allow # every provider key under the prefix
+              Action: secretsmanager:GetSecretValue
+              Resource: !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:pa/${Stage}/llm/*"
+            - Effect: Allow # IAM database auth as the "app" role, created by the migration Lambda
+              Action: rds-db:connect
+              Resource: !Sub "arn:${AWS::Partition}:rds-db:${AWS::Region}:${AWS::AccountId}:dbuser:${Database.DbiResourceId}/app"
+      FunctionUrlConfig:
+        AuthType: NONE # JWT verified in code
+        InvokeMode: RESPONSE_STREAM
+  ChatLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/pa-${Stage}-chat"
+      RetentionInDays: 30
+
+  # ── Runs migrations inside the VPC; invoke after each deploy ──
+  MigrateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "pa-${Stage}-migrate"
+      CodeUri: ../packages/db/dist
+      MemorySize: 512
+      Timeout: 120
+      Environment:
+        Variables:
+          DB_SECRET_ARN: !GetAtt Database.MasterUserSecret.SecretArn
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !GetAtt Database.MasterUserSecret.SecretArn
+
+Outputs:
+  ChatBaseUrl:
+    Description: Function URL for chat turns and warm-up; the app reads it from GET /me (Phase 2) or config.
+    Value: !GetAtt ChatFunctionUrl.FunctionUrl
+  UserPoolId:
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
+  CognitoDomain:
+    Value: !Sub "https://${CognitoDomainPrefix}.auth.${AWS::Region}.amazoncognito.com"
+  DbEndpoint:
+    Description: Connect from a laptop with an IAM token (README, Deploy).
+    Value: !GetAtt Database.Endpoint.Address
+  MigrateFunctionName:
+    Value: !Ref MigrateFunction
+  AnthropicSecretArn:
+    Value: !Ref AnthropicApiKey

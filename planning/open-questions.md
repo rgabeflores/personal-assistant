@@ -119,16 +119,18 @@ Small models suit narration tasks (check-in writer, titles, summaries, weekly re
 - **Alternative B, on the phone:** Apple's on-device model or Gemini Nano, for offline read-back and offline quick-log parsing. This is a separate client feature after Phase 6, not a server provider.
 - **Blocks:** nothing in Phases 1–3.
 
-### Q-22 Thin in-house model interface or the Vercel AI SDK? · Proposed
-
-- **Default:** a thin in-house interface with three adapters (Anthropic, OpenAI, OpenAI-compatible). It keeps prompt caching, streaming events, and errors under our control and the Lambda bundle small.
-- **Alternative:** the Vercel AI SDK, which already normalizes many providers. Worth switching to if we end up with more than three or four adapters.
-- **Blocks:** Phase 1 scaffolding of `packages/models`.
-
 ### Q-23 Configure a second cloud provider as a fallback? · Open
 
 - **Default:** no. Anthropic models fall back to each other (Haiku → Sonnet for `logging.simple`). An OpenAI key adds another account and another place personal data goes (model-providers.md §10).
 - **Alternative:** add an OpenAI model as the `chat.agent` fallback once it passes the chat evals, so an Anthropic outage does not take chat down.
+
+### Q-25 In-app model picker · Proposed
+
+Should the user choose models in Settings, beyond what the operator sets in `MODEL_CONFIG`? The design is in [model-providers.md §11](model-providers.md#11-in-app-model-picker-proposed-q-25).
+
+- **Default:** yes, after Phase 2. Two choices, "Chat model" and "Background model", offered only from models with a configured key and passing evals, plus a Default option. Keys stay out of the app in V1.
+- **Open:** is two groups enough, or should every task be choosable? Should keys ever be entered in the app?
+- **Blocks:** a Settings mockup row, `GET /models`, `PUT /me/model-settings`, and `users.model_settings`.
 
 ## Data and lifecycle
 
@@ -161,3 +163,5 @@ The weekly review shows up in History as a `review` conversation ("Training this
 | Q-5e (old) | Populated Insights mockup | Added (p.4); payload updated (D-35) |
 | Q-6 | Transport for streaming chat | A Lambda Function URL with response streaming (D-38, [chat-service.md](chat-service.md)). A Fargate container behind an ALB was considered and rejected on cost (~$30–35/mo vs ~$0–1/mo). |
 | Q-12 | Speaker button in the Chat header | Removed from the updated mockups (p.2). Read-back is set only in Settings. |
+| Q-24 | Baseline AWS cost of the private network (~$70/mo for NAT gateway, RDS Proxy, and RDS) | No RDS Proxy and no NAT. Lambdas run outside any VPC; RDS is publicly reachable with forced TLS and IAM database auth (ARCH §10). About $17/mo (RDS `db.t4g.micro`, storage, public IPv4). A NAT instance with a private database (~$21/mo) was the alternative. |
+| Q-22 | Thin in-house model interface or the Vercel AI SDK? | In-house: `packages/models` with an Anthropic adapter and one fetch-based OpenAI/OpenAI-compatible adapter, driven by `MODEL_CONFIG` (D-53). |

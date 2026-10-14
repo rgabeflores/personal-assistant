@@ -1,0 +1,20 @@
+{
+  "name": "@pa/agent",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@pa/models": "workspace:*",
+    "@pa/services": "workspace:*",
+    "pg": "^8.23.1"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.23.1",
+    "@pa/db": "workspace:*"
+  }
+}
