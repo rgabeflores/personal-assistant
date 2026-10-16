@@ -4,13 +4,14 @@ import { ModelRouter } from "./router.js";
 import type { ModelConfig } from "./routing.js";
 import type { ModelAdapter } from "./types.js";
 
-export type ProviderKeys = Record<string, string | undefined>;
+/** Static keys by provider id, or a lookup that can refresh them (e.g. from Secrets Manager). */
+export type ProviderKeys = Record<string, string | undefined> | ((provider: string) => string | undefined | Promise<string | undefined>);
 
 /** Builds one adapter per configured provider and a router over the configured routes. */
 export function createModelRouter(config: ModelConfig, keys: ProviderKeys): ModelRouter {
   const adapters: Record<string, ModelAdapter> = {};
   for (const [id, p] of Object.entries(config.providers)) {
-    const apiKey = () => keys[id];
+    const apiKey = typeof keys === "function" ? () => keys(id) : () => keys[id];
     switch (p.kind) {
       case "anthropic":
         adapters[id] = new AnthropicAdapter(apiKey);

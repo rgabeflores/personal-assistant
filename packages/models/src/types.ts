@@ -45,6 +45,9 @@ export type ModelEvent =
   | { type: "tool_call"; id: string; name: string; input: unknown }
   | { type: "done"; stopReason: StopReason; usage: Usage; model: ModelRef };
 
+/** Returns the current key; may look it up, so a rotated key is picked up without a restart. */
+export type KeySource = () => string | undefined | Promise<string | undefined>;
+
 export type Capabilities = {
   tools: boolean;
   streaming: boolean;

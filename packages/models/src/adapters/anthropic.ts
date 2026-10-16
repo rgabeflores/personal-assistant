@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { ModelError, type Block, type ModelAdapter, type ModelEvent, type ModelRequest, type StopReason } from "../types.js";
+import { ModelError, type Block, type KeySource, type ModelAdapter, type ModelEvent, type ModelRequest, type StopReason } from "../types.js";
 
 type AnthropicBlock = Anthropic.Messages.ContentBlockParam;
 
@@ -40,24 +40,23 @@ function mapStopReason(reason: string | null | undefined): StopReason {
 }
 
 export class AnthropicAdapter implements ModelAdapter {
-  private client: Anthropic | undefined;
+  private client: { key: string; sdk: Anthropic } | undefined;
 
-  constructor(private readonly apiKey: () => string | undefined) {}
+  constructor(private readonly apiKey: KeySource) {}
 
-  private getClient(): Anthropic {
-    if (!this.client) {
-      const apiKey = this.apiKey();
-      if (!apiKey) throw new ModelError("Anthropic API key is not configured", false);
-      // Retries and fallback are handled by the router, not the SDK.
-      this.client = new Anthropic({ apiKey, maxRetries: 0, timeout: 60_000 });
-    }
-    return this.client;
+  private async getClient(): Promise<Anthropic> {
+    const key = await this.apiKey();
+    if (!key) throw new ModelError("Anthropic API key is not configured", false);
+    // Rebuilt when the key changes. Retries and fallback are handled by the router, not the SDK.
+    if (this.client?.key !== key) this.client = { key, sdk: new Anthropic({ apiKey: key, maxRetries: 0, timeout: 60_000 }) };
+    return this.client.sdk;
   }
 
   async *stream(model: string, req: ModelRequest, signal?: AbortSignal): AsyncIterable<ModelEvent> {
+    const client = await this.getClient();
     let events: AsyncIterable<Anthropic.Messages.RawMessageStreamEvent>;
     try {
-      events = await this.getClient().messages.create(toAnthropicRequest(model, req), { signal });
+      events = await client.messages.create(toAnthropicRequest(model, req), { signal });
     } catch (err) {
       throw toModelError(err);
     }

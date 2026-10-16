@@ -14,9 +14,13 @@
     "db:up": "docker compose up -d --wait db",
     "db:migrate": "pnpm --filter @pa/db migrate",
     "dev:chat": "pnpm --filter @pa/chat dev",
-    "eval": "pnpm --filter @pa/evals eval"
+    "eval": "pnpm --filter @pa/evals eval",
+    "keys:sync": "tsx scripts/sync-model-keys.ts"
   },
   "devDependencies": {
+    "@aws-sdk/client-cloudformation": "^3.1151.0",
+    "@aws-sdk/client-secrets-manager": "^3.1151.0",
+    "@pa/models": "workspace:*",
     "@types/node": "^22.0.0",
     "esbuild": "^0.28.2",
     "tsx": "^4.23.15",

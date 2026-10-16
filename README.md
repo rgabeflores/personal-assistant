@@ -71,13 +71,14 @@ Runs every case in `evals/cases/` through the real agent loop and tools against 
 scripts/deploy.sh CognitoDomainPrefix=<globally-unique-prefix>
 ```
 
-This builds the bundles, deploys `infra/template.yaml` to `us-west-2`, and runs migrations through the migration Lambda, which also creates the IAM-authenticated `app` database role.
+This builds the bundles, deploys `infra/template.yaml` to `us-west-2`, syncs model provider keys into Secrets Manager, and runs migrations through the migration Lambda, which also creates the IAM-authenticated `app` database role.
+
+**Model keys** are synced by `pnpm keys:sync`, which the deploy runs. For each provider that the deployed `ModelConfig` routes to, it reads `<PROVIDER>_API_KEY` from the shell environment, then from `.env`. It then creates or updates `pa/dev/llm/<provider>` and reports created, updated, unchanged, or missing, without printing any value. It never clears a secret when no local key is set. Running Lambdas pick up a new or rotated key within 5 minutes, or within 30 seconds if the key was missing. In CI, pass the key as an environment variable from the CI secret store. To add another provider, pass `ModelConfig` with the provider, its models, and the routes that use it, and set its `<PROVIDER>_API_KEY` before deploying.
 
 The Lambdas run outside any VPC. Postgres has a public endpoint with forced TLS, and the Lambdas sign in with IAM database authentication. There is no NAT gateway or RDS Proxy (ARCH §10, Q-24). The baseline cost is about $17 a month, mostly the `db.t4g.micro` instance.
 
 After the first deploy:
 
-1. Put the Anthropic key in the `pa/dev/llm/anthropic` secret. Other providers: create `pa/dev/llm/<provider>` and pass the stack parameter `ModelConfig` with that provider, its models, and the routes that use it.
-2. Create your user: `aws cognito-idp admin-create-user --user-pool-id <UserPoolId> --username <email>` (self sign-up is off, D-31).
-3. Set `EXPO_PUBLIC_CHAT_BASE_URL`, `EXPO_PUBLIC_COGNITO_DOMAIN`, and `EXPO_PUBLIC_COGNITO_CLIENT_ID` in `apps/mobile/.env` from the stack outputs, and set `EXPO_PUBLIC_DEV_SKIP_AUTH=false`.
-4. To use `psql` from a laptop, sign in as the master user with the password from the RDS-managed secret (`aws secretsmanager get-secret-value --secret-id <MasterUserSecret>`), with `sslmode=verify-full` and `sslrootcert=packages/db/src/rds-ca.pem`.
+1. Create your user: `aws cognito-idp admin-create-user --user-pool-id <UserPoolId> --username <email>` (self sign-up is off, D-31).
+2. Set `EXPO_PUBLIC_CHAT_BASE_URL`, `EXPO_PUBLIC_COGNITO_DOMAIN`, and `EXPO_PUBLIC_COGNITO_CLIENT_ID` in `apps/mobile/.env` from the stack outputs, and set `EXPO_PUBLIC_DEV_SKIP_AUTH=false`.
+3. To use `psql` from a laptop, sign in as the master user with the password from the RDS-managed secret (`aws secretsmanager get-secret-value --secret-id <MasterUserSecret>`), with `sslmode=verify-full` and `sslrootcert=packages/db/src/rds-ca.pem`.

@@ -1,4 +1,4 @@
-import { ModelError, type Block, type ModelAdapter, type ModelEvent, type ModelRequest, type StopReason, type Turn } from "../types.js";
+import { ModelError, type Block, type KeySource, type ModelAdapter, type ModelEvent, type ModelRequest, type StopReason, type Turn } from "../types.js";
 
 // Chat Completions over fetch. Serves OpenAI and any OpenAI-compatible server
 // (Ollama, llama.cpp, vLLM, and hosted open models), so no SDK is needed.
@@ -10,7 +10,7 @@ type ChatMessage =
 
 export type OpenAIAdapterOptions = {
   baseUrl: string;
-  apiKey: () => string | undefined;
+  apiKey: KeySource;
   /** OpenAI's own API wants max_completion_tokens; compatible servers expect max_tokens. */
   tokenParam: "max_completion_tokens" | "max_tokens";
   /** "none" for servers that take no key. */
@@ -73,7 +73,7 @@ export class OpenAIAdapter implements ModelAdapter {
   ) {}
 
   async *stream(model: string, req: ModelRequest, signal?: AbortSignal): AsyncIterable<ModelEvent> {
-    const key = this.opts.apiKey();
+    const key = this.opts.auth === "none" ? undefined : await this.opts.apiKey();
     if (this.opts.auth === "key" && !key) throw new ModelError(`No API key configured for provider "${this.providerId}"`, false);
 
     const timeout = AbortSignal.timeout(this.opts.timeoutMs ?? 60_000);

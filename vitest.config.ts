@@ -6,7 +6,7 @@ if (existsSync(".env")) process.loadEnvFile(".env");
 
 export default defineConfig({
   test: {
-    include: ["apps/chat/src/**/*.test.ts", "apps/mobile/src/lib/**/*.test.ts", "packages/*/src/**/*.test.ts"],
+    include: ["scripts/*.test.ts", "apps/chat/src/**/*.test.ts", "apps/mobile/src/lib/**/*.test.ts", "packages/*/src/**/*.test.ts"],
     testTimeout: 15_000,
   },
 });
